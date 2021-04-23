@@ -1,10 +1,4 @@
-import React, {
-  createContext,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import * as React from 'react';
 import {
   AuthenticationDetails,
   CognitoUser,
@@ -55,15 +49,15 @@ const useCognitoAuth = (
   config: UserPoolConfig,
   temporary?: boolean,
 ) => {
-  const storeRef = useRef(temporary ? new MemoryCognitoStorage() : undefined);
+  const storeRef = React.useRef(temporary ? new MemoryCognitoStorage() : undefined);
   const userPoolConfig: ICognitoUserPoolData = {
     ...config,
     Storage: storeRef.current,
   };
   const userPool = new CognitoUserPool(userPoolConfig);
-  const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
-  const [cachedUser, setCachedUser] = useState<User | null>(null);
-  const tmpUser = useRef<CognitoUser>();
+  const [isLoggedIn, setIsLoggedIn] = React.useState<boolean | null>(null);
+  const [cachedUser, setCachedUser] = React.useState<User | null>(null);
+  const tmpUser = React.useRef<CognitoUser>();
 
   const getUserObjectFromUser = async (user: CognitoUser) => {
     return new Promise<User>((resolve, reject) => {
@@ -282,7 +276,7 @@ const useCognitoAuth = (
       });
     });
 
-  useEffect(() => {
+  React.useEffect(() => {
     getUserSession().catch((err) =>
       console.error('failed to get user session', err),
     );
@@ -381,10 +375,10 @@ const useCognitoAuth = (
 
 type AuthState = ReturnType<typeof useCognitoAuth>;
 
-const CognitoAuthContext = createContext<AuthState | null>(null);
+const CognitoAuthContext = React.createContext<AuthState | null>(null);
 
 export const useCognitoAuthContext = () => {
-  const ctx = useContext(CognitoAuthContext);
+  const ctx = React.useContext(CognitoAuthContext);
   if (!ctx) {
     throw new Error('CognitoAuthContext not initialised');
   }
