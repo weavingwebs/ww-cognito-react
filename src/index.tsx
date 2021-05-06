@@ -90,7 +90,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
           const attr = result?.UserAttributes || [];
           resolve({
             ...buildUser(user, attr),
-            totpEnabled: !!result?.UserMFASettingList.includes('SOFTWARE_TOKEN_MFA')
+            totpEnabled: !!result?.UserMFASettingList?.includes('SOFTWARE_TOKEN_MFA')
           });
         });
       });
