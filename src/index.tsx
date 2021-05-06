@@ -5,13 +5,15 @@ import {
   CognitoUserAttribute,
   CognitoUserPool,
   CognitoUserSession,
-  ICognitoStorage,
+  ICognitoStorage, ICognitoUserAttributeData,
   ICognitoUserPoolData,
 } from 'amazon-cognito-identity-js';
+import * as qs from 'qs';
 
 export enum AuthResult {
   SUCCESS,
   NEW_PASSWORD_REQUIRED,
+  TOTP_REQUIRED,
 }
 
 class MemoryCognitoStorage implements ICognitoStorage {
@@ -38,13 +40,13 @@ class MemoryCognitoStorage implements ICognitoStorage {
   }
 }
 
-export const defaultBuildUser = (user: CognitoUser, attr: CognitoUserAttribute[]) => {
+export const defaultBuildUser = (user: CognitoUser, attr: ICognitoUserAttributeData[]) => {
   let email: string | undefined;
   attr.forEach((a) => {
-    switch (a.getName()) {
+    switch (a.Name) {
       case 'email':
       {
-        email = a.getValue();
+        email = a.Value;
         break;
       }
     }
@@ -62,7 +64,7 @@ export type DefaultUser = ReturnType<typeof defaultBuildUser>
 
 export type UserPoolConfig = { UserPoolId: string; ClientId: string }
 
-export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: CognitoUserAttribute[]) => TUser) {
+export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: ICognitoUserAttributeData[]) => TUser) {
   const useCognitoAuth = (
     config: UserPoolConfig,
     temporary?: boolean,
@@ -74,21 +76,22 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: Co
     };
     const userPool = new CognitoUserPool(userPoolConfig);
     const [isLoggedIn, setIsLoggedIn] = React.useState<boolean | null>(null);
-    const [cachedUser, setCachedUser] = React.useState<TUser | null>(null);
+    const [cachedUser, setCachedUser] = React.useState<TUser & {totpEnabled: boolean} | null>(null);
     const tmpUser = React.useRef<CognitoUser>();
 
     const getUserObjectFromUser = async (user: CognitoUser) => {
-      return new Promise<TUser>((resolve, reject) => {
-        user.getUserAttributes((err, result) => {
+      return new Promise<TUser & {totpEnabled: boolean}>((resolve, reject) => {
+        user.getUserData((err, result) => {
           if (err) {
             console.error('Error getting user attributes', err);
             reject(err);
             return;
           }
-          if (!result) {
-            result = [];
-          }
-          resolve(buildUser(user, result));
+          const attr = result?.UserAttributes || [];
+          resolve({
+            ...buildUser(user, attr),
+            totpEnabled: !!result?.UserMFASettingList.includes('SOFTWARE_TOKEN_MFA')
+          });
         });
       });
     };
@@ -170,13 +173,14 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: Co
                 .catch(reject);
             },
             newPasswordRequired: () => resolve(AuthResult.NEW_PASSWORD_REQUIRED),
+            totpRequired: () => resolve(AuthResult.TOTP_REQUIRED),
             onFailure: reject,
           },
         );
       });
 
     const completeNewPasswordChallenge = (newPassword: string) =>
-      new Promise<unknown>((resolve, reject) => {
+      new Promise<AuthResult>((resolve, reject) => {
         if (!tmpUser.current) {
           throw new Error(
             'No active authentication, please refresh the page and try again',
@@ -190,10 +194,12 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: Co
               console.debug('new password success', session);
               // Use getUser to trigger an update of cachedUser & isLoggedIn.
               getUser()
-                .then(() => resolve(true))
+                .then(() => resolve(AuthResult.SUCCESS))
                 .catch(reject);
             },
             onFailure: reject,
+            // @ts-ignore This property does actually exist.
+            totpRequired: () => resolve(AuthResult.TOTP_REQUIRED),
           },
         );
       });
@@ -359,6 +365,77 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: Co
       });
     };
 
+    /**
+     * Disassociate any existing TOTP and generate a new secret key.
+     */
+    const associateTotp = async () => {
+      const user = await getUser();
+      if (!user) {
+        throw new Error('Not logged in');
+      }
+      return new Promise<string>((resolve, reject) => {
+        user.associateSoftwareToken({
+          associateSecretCode: resolve,
+          onFailure: reject,
+        })
+      });
+    }
+
+    const verifyTotp = async ({totpCode, friendlyDeviceName}: {
+      totpCode: string,
+      friendlyDeviceName: string,
+    }) => {
+      const user = await getUser();
+      if (!user) {
+        throw new Error('Not logged in');
+      }
+      return new Promise<void>((resolve, reject) => {
+        user.verifySoftwareToken(totpCode, friendlyDeviceName, {
+          onSuccess: () => resolve(),
+          onFailure: reject,
+        })
+      });
+    }
+
+    const enableTotp = async () => {
+      const user = await getUser();
+      if (!user) {
+        throw new Error('Not logged in');
+      }
+      return new Promise<string>((resolve, reject) => {
+        user.setUserMfaPreference(null, {PreferredMfa: true, Enabled: true}, (err, result) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(result)
+        })
+      });
+    }
+
+    const respondToTotpChallenge = async (totp: string) => {
+      return new Promise<void>((resolve, reject) => {
+        if (!tmpUser.current) {
+          throw new Error(
+            'No active authentication, please refresh the page and try again',
+          );
+        }
+        tmpUser.current.sendMFACode(
+          totp,
+          {
+            onSuccess: () => {
+              // Use getUser to trigger an update of cachedUser & isLoggedIn.
+              getUser()
+                .then(() => resolve())
+                .catch(reject);
+            },
+            onFailure: reject,
+          },
+          'SOFTWARE_TOKEN_MFA',
+        )
+      });
+    }
+
     return {
       isLoggedIn,
       user: cachedUser,
@@ -373,6 +450,10 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: Co
       updateEmail,
       verifyNewEmail,
       changePassword,
+      associateTotp,
+      verifyTotp,
+      enableTotp,
+      respondToTotpChallenge,
     };
   };
 
@@ -404,3 +485,14 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: Co
   }
 }
 
+/**
+ * Create a TOTP Uri for use with authenticator apps.
+ * https://github.com/google/google-authenticator/wiki/Key-Uri-Format
+ */
+export function buildTotpUri({accountName, secret, issuer}: {
+  accountName: string,
+  secret: string,
+  issuer: string,
+}): string {
+  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(accountName)}?${qs.stringify({secret, issuer})}`;
+}
