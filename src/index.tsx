@@ -69,7 +69,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
     config: UserPoolConfig,
     temporary?: boolean,
   ) => {
-    const storeRef = React.useRef(temporary ? new MemoryCognitoStorage() : undefined);
+    const storeRef = React.useRef<ICognitoStorage>(temporary ? new MemoryCognitoStorage() : localStorage);
     const userPoolConfig: ICognitoUserPoolData = {
       ...config,
       Storage: storeRef.current,
@@ -78,6 +78,23 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
     const [isLoggedIn, setIsLoggedIn] = React.useState<boolean | null>(null);
     const [cachedUser, setCachedUser] = React.useState<TUser & {totpEnabled: boolean} | null>(null);
     const tmpUser = React.useRef<CognitoUser>();
+
+    // NOTE: Cannot find any proper way to detect whether totp is enabled and
+    // cannot try and keep mfa preference in sync manually either so we have to
+    // track it manually as best we can.
+    // https://github.com/aws-amplify/amplify-js/issues/1226
+    const setTotpEnabled = (enabled: boolean) => {
+      storeRef.current.setItem(`ww-cognito-react.${config.ClientId}.totpEnabled`, enabled ? '1' : '0');
+      if (cachedUser) {
+        setCachedUser({
+          ...cachedUser,
+          totpEnabled: enabled,
+        })
+      }
+    }
+    const getTotpEnabled = () => {
+      return storeRef.current.getItem(`ww-cognito-react.${config.ClientId}.totpEnabled`) === '1';
+    }
 
     const getUserObjectFromUser = async (user: CognitoUser) => {
       return new Promise<TUser & {totpEnabled: boolean}>((resolve, reject) => {
@@ -90,7 +107,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
           const attr = result?.UserAttributes || [];
           resolve({
             ...buildUser(user, attr),
-            totpEnabled: !!result?.UserMFASettingList?.includes('SOFTWARE_TOKEN_MFA')
+            totpEnabled: getTotpEnabled(),
           });
         });
       });
@@ -102,6 +119,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
           console.debug('no user session');
           setIsLoggedIn(false);
           setCachedUser(null);
+          setTotpEnabled(false);
           resolve(null);
           return;
         }
@@ -111,6 +129,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
               console.error('cognito getSession error', error);
               setIsLoggedIn(false);
               setCachedUser(null);
+              setTotpEnabled(false);
               reject(error);
               return;
             }
@@ -173,7 +192,10 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
                 .catch(reject);
             },
             newPasswordRequired: () => resolve(AuthResult.NEW_PASSWORD_REQUIRED),
-            totpRequired: () => resolve(AuthResult.TOTP_REQUIRED),
+            totpRequired: () => {
+              setTotpEnabled(true);
+              resolve(AuthResult.TOTP_REQUIRED);
+            },
             onFailure: reject,
           },
         );
@@ -199,7 +221,10 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
             },
             onFailure: reject,
             // @ts-ignore This property does actually exist.
-            totpRequired: () => resolve(AuthResult.TOTP_REQUIRED),
+            totpRequired: () => {
+              setTotpEnabled(true);
+              resolve(AuthResult.TOTP_REQUIRED);
+            },
           },
         );
       });
@@ -219,6 +244,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
           user.signOut();
 
           // Use getUser to trigger an update of cachedUser & isLoggedIn.
+          setTotpEnabled(false);
           getUser()
             .then(() => resolve())
             .catch(reject);
@@ -374,6 +400,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
         throw new Error('Not logged in');
       }
       return new Promise<string>((resolve, reject) => {
+        setTotpEnabled(false);
         user.associateSoftwareToken({
           associateSecretCode: resolve,
           onFailure: reject,
@@ -408,7 +435,8 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
             reject(err);
             return;
           }
-          resolve(result)
+          setTotpEnabled(true);
+          resolve(result);
         })
       });
     }
@@ -424,6 +452,8 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
           totp,
           {
             onSuccess: () => {
+              setTotpEnabled(true);
+
               // Use getUser to trigger an update of cachedUser & isLoggedIn.
               getUser()
                 .then(() => resolve())
