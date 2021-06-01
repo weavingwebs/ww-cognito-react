@@ -65,17 +65,13 @@ class StorageHelper {
   protected storageWindow: ICognitoStorage;
 
   constructor() {
-    if (typeof window.localStorage === 'undefined') {
+    try {
+      this.storageWindow = window.localStorage;
+      this.storageWindow.setItem('aws.cognito.test-ls', '1');
+      this.storageWindow.removeItem('aws.cognito.test-ls');
+    }
+    catch (exception) {
       this.storageWindow = new MemoryCognitoStorage();
-    } else {
-      try {
-        this.storageWindow = window.localStorage;
-        this.storageWindow.setItem('aws.cognito.test-ls', '1');
-        this.storageWindow.removeItem('aws.cognito.test-ls');
-      }
-      catch (exception) {
-        this.storageWindow = new MemoryCognitoStorage();
-      }
     }
   }
 
