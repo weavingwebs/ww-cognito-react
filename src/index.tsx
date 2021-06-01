@@ -60,6 +60,30 @@ export const defaultBuildUser = (user: CognitoUser, attr: ICognitoUserAttributeD
   };
 }
 
+// Copy of amazon-cognito-identity-js/StorageHelper.js (not exported in types).
+class StorageHelper {
+  protected storageWindow: ICognitoStorage;
+
+  constructor() {
+    if (typeof window.localStorage === 'undefined') {
+      this.storageWindow = new MemoryCognitoStorage();
+    } else {
+      try {
+        this.storageWindow = window.localStorage;
+        this.storageWindow.setItem('aws.cognito.test-ls', '1');
+        this.storageWindow.removeItem('aws.cognito.test-ls');
+      }
+      catch (exception) {
+        this.storageWindow = new MemoryCognitoStorage();
+      }
+    }
+  }
+
+  public getStorage() {
+    return this.storageWindow;
+  }
+}
+
 export type DefaultUser = ReturnType<typeof defaultBuildUser>
 
 export type UserPoolConfig = { UserPoolId: string; ClientId: string }
@@ -69,7 +93,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
     config: UserPoolConfig,
     temporary?: boolean,
   ) => {
-    const storeRef = React.useRef<ICognitoStorage>(temporary ? new MemoryCognitoStorage() : localStorage);
+    const storeRef = React.useRef<ICognitoStorage>(temporary ? new MemoryCognitoStorage() : new StorageHelper().getStorage());
     const userPoolConfig: ICognitoUserPoolData = {
       ...config,
       Storage: storeRef.current,
