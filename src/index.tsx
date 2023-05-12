@@ -188,10 +188,6 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
 
     const authenticate = (email: string, pass: string) =>
       new Promise<AuthResult>((resolve, reject) => {
-        if (new Date().getTime() > 0) {
-          reject(new Error('yes this is actually doing something!'));
-          return;
-        }
         tmpUser.current = new CognitoUser({
           Username: email,
           Pool: userPool,
