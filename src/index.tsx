@@ -434,6 +434,19 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
       });
     }
 
+    const completeMfaSetupChallenge = () =>
+      new Promise<string>((resolve, reject) => {
+        if (!tmpUser.current) {
+          throw new Error(
+            'No active authentication, please refresh the page and try again',
+          );
+        }
+        tmpUser.current.associateSoftwareToken({
+          associateSecretCode: resolve,
+          onFailure: reject,
+        })
+      });
+
     const verifyTotp = async ({totpCode, friendlyDeviceName}: {
       totpCode: string,
       friendlyDeviceName: string,
@@ -507,6 +520,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
       verifyNewEmail,
       changePassword,
       associateTotp,
+      completeMfaSetupChallenge,
       verifyTotp,
       enableTotp,
       respondToTotpChallenge,
