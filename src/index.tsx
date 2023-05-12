@@ -14,6 +14,7 @@ export enum AuthResult {
   SUCCESS,
   NEW_PASSWORD_REQUIRED,
   TOTP_REQUIRED,
+  MFA_SETUP,
 }
 
 class MemoryCognitoStorage implements ICognitoStorage {
@@ -187,6 +188,10 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
 
     const authenticate = (email: string, pass: string) =>
       new Promise<AuthResult>((resolve, reject) => {
+        if (new Date().getTime() > 0) {
+          reject(new Error('yes this is actually doing something!'));
+          return;
+        }
         tmpUser.current = new CognitoUser({
           Username: email,
           Pool: userPool,
@@ -212,6 +217,9 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
                 .catch(reject);
             },
             newPasswordRequired: () => resolve(AuthResult.NEW_PASSWORD_REQUIRED),
+            mfaSetup: () => {
+              resolve(AuthResult.MFA_SETUP);
+            },
             totpRequired: () => {
               setTotpEnabled(true);
               resolve(AuthResult.TOTP_REQUIRED);
@@ -240,7 +248,9 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
                 .catch(reject);
             },
             onFailure: reject,
-            // @ts-ignore This property does actually exist.
+            mfaSetup: () => {
+              resolve(AuthResult.MFA_SETUP);
+            },
             totpRequired: () => {
               setTotpEnabled(true);
               resolve(AuthResult.TOTP_REQUIRED);
@@ -326,7 +336,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
           Storage: storeRef.current,
         });
         cognitoUser.confirmPassword(verificationCode, newPassword, {
-          onSuccess: resolve,
+          onSuccess: () => resolve(),
           onFailure: reject,
         });
       });

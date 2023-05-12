@@ -1,6 +1,6 @@
 {
   "name": "@weavingwebs/ww-cognito-react",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
@@ -12,8 +12,9 @@
     "watch": "tsc -w"
   },
   "dependencies": {
-    "amazon-cognito-identity-js": "^4.5.0",
-    "qs": "^6.10.1"
+    "amazon-cognito-identity-js": "^6.2.0",
+    "encoding": "^0.1.13",
+    "qs": "^6.11.1"
   },
   "peerDependencies": {
     "react": "^16.9.0"
