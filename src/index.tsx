@@ -539,7 +539,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
     return ctx;
   };
 
-  const CognitoAuthProvider: React.FC<{ userPool: UserPoolConfig, temporary?: boolean }> = ({
+  const CognitoAuthProvider: React.FC<React.PropsWithChildren<{ userPool: UserPoolConfig, temporary?: boolean }>> = ({
     userPool,
     temporary,
     children,
