@@ -9,7 +9,7 @@ import {
   ICognitoUserPoolData,
 } from 'amazon-cognito-identity-js';
 import * as qs from 'qs';
-import isEqual from 'lodash/isEqual';
+import {isEqual} from 'lodash';
 
 export enum AuthResult {
   SUCCESS,
