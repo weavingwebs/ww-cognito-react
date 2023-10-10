@@ -488,7 +488,7 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
       if (!user) {
         throw new Error('Not logged in');
       }
-      return new Promise<string>((resolve, reject) => {
+      return new Promise<string|undefined>((resolve, reject) => {
         user.setUserMfaPreference(null, {PreferredMfa: true, Enabled: true}, (err, result) => {
           if (err) {
             reject(err);
