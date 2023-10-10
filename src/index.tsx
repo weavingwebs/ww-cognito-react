@@ -9,6 +9,7 @@ import {
   ICognitoUserPoolData,
 } from 'amazon-cognito-identity-js';
 import * as qs from 'qs';
+import isEqual from 'lodash/isEqual';
 
 export enum AuthResult {
   SUCCESS,
@@ -158,8 +159,10 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
             getUserObjectFromUser(user)
               .then((u) => {
                 console.debug('cognito got user object', u);
-                setCachedUser(u);
-                setIsLoggedIn(true);
+                if (!isEqual(u, cachedUser)) {
+                  setCachedUser(u);
+                  setIsLoggedIn(true);
+                }
                 resolve(session);
               })
               .catch(reject);
