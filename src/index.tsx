@@ -270,13 +270,13 @@ export function createCognitoAuth<TUser>(buildUser: (user: CognitoUser, attr: IC
       new Promise<void>((resolve, reject) => {
         const user = userPool.getCurrentUser();
         if (user) {
-          user.signOut();
-
-          // Use getUser to trigger an update of cachedUser & isLoggedIn.
-          setTotpEnabled(false);
-          getUser()
-            .then(() => resolve())
-            .catch(reject);
+          user.signOut(() => {
+            // Use getUser to trigger an update of cachedUser & isLoggedIn.
+            setTotpEnabled(false);
+            getUser()
+              .then(() => resolve())
+              .catch(reject);
+          });
         }
         else {
           resolve();
