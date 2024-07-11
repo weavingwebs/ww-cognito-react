@@ -1,6 +1,6 @@
 {
   "name": "@weavingwebs/ww-cognito-react",
-  "version": "1.2.12",
+  "version": "2.0.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
@@ -12,18 +12,17 @@
     "watch": "tsc -w"
   },
   "dependencies": {
-    "amazon-cognito-identity-js": "^6.2.0",
+    "amazon-cognito-identity-js": "^6.3.12",
     "encoding": "^0.1.13",
-    "lodash": "^4.17.21",
-    "qs": "^6.11.1"
+    "qs": "^6.12.3"
   },
   "peerDependencies": {
     "react": "^16.9.0"
   },
   "devDependencies": {
-    "@types/lodash": "^4.14.199",
-    "@types/qs": "^6.9.6",
-    "@types/react": "^16.9.0",
-    "typescript": "^5.2.2"
-  }
+    "@types/qs": "^6.9.15",
+    "@types/react": "^18.3.3",
+    "typescript": "^5.5.3"
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }
