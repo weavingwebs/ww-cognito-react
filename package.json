@@ -1,12 +1,13 @@
 {
   "name": "@weavingwebs/ww-cognito-react",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
   },
   "repository": "git://github.com/weavingwebs/ww-cognito-react.git",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w"
