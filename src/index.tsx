@@ -299,7 +299,15 @@ export function createCognitoAuth<User extends object>(
         if (!currentUserRef.current) {
           return null;
         }
-        const session = await getSession(currentUserRef.current.cognitoUser);
+        let session: CognitoUserSession | null;
+        try {
+          session = await getSession(currentUserRef.current.cognitoUser);
+        }
+        catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('Error getting session', err);
+          return null;
+        }
         if (!session) {
           // eslint-disable-next-line no-console
           console.debug('Cognito session is no longer valid');
