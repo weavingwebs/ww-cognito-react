@@ -56,21 +56,6 @@ type AuthStateAnon<User> = {
   ) => Promise<
     (verificationCode: string, newPassword: string) => Promise<void>
   >;
-  // NOTE: You must call authenticate after successfully resetting the password
-  // if you want to log the user in automatically.
-  confirmResetPassword: (
-    email: string,
-    verificationCode: string,
-    newPassword: string,
-  ) => Promise<void>;
-  verifyTotp: (
-    totpCode: string,
-    friendlyDeviceName: string,
-  ) => Promise<CognitoUserSession>;
-  respondToTotpChallenge: (totpCode: string) => Promise<CognitoUserSession>;
-  sendCustomChallengeAnswer: (
-    answerChallenge: any,
-  ) => Promise<CognitoUserSession>;
 };
 type AuthStateLoggedIn<User> = Omit<AuthStateAnon<User>, 'isLoggedIn'> & {
   isLoggedIn: true;
@@ -254,49 +239,6 @@ export function createCognitoAuth<User extends object>(
           });
           return resetPassword(cognitoUser);
         },
-        confirmResetPassword: async (
-          email: string,
-          verificationCode: string,
-          newPassword: string,
-        ) => {
-          const cognitoUser = new CognitoUser({
-            Username: email,
-            Pool: userPool,
-            Storage: storeRef.current,
-          });
-          return confirmResetPassword(
-            cognitoUser,
-            verificationCode,
-            newPassword,
-          );
-        },
-        verifyTotp: async (totpCode: string, friendlyDeviceName: string) => {
-          const cognitoUser = userPool.getCurrentUser();
-          if (!cognitoUser) {
-            throw new Error(
-              'No active authentication, please refresh the page and try again',
-            );
-          }
-          return verifyTotp(cognitoUser, { totpCode, friendlyDeviceName });
-        },
-        respondToTotpChallenge: async (totpCode: string) => {
-          const cognitoUser = userPool.getCurrentUser();
-          if (!cognitoUser) {
-            throw new Error(
-              'No active authentication, please refresh the page and try again',
-            );
-          }
-          return respondToTotpChallenge(cognitoUser, totpCode);
-        },
-        sendCustomChallengeAnswer: async (answerChallenge: any) => {
-          const cognitoUser = userPool.getCurrentUser();
-          if (!cognitoUser) {
-            throw new Error(
-              'No active authentication, please refresh the page and try again',
-            );
-          }
-          return sendCustomChallengeAnswer(cognitoUser, answerChallenge);
-        }
       };
       if (!isLoggedIn) {
         return {
@@ -623,7 +565,9 @@ async function resetPassword(cognitoUser: CognitoUser) {
   });
 }
 
-async function confirmResetPassword(
+// NOTE: You must call authenticate after successfully resetting the password
+// if you want to log the user in automatically.
+export async function confirmResetPassword(
   cognitoUser: CognitoUser,
   verificationCode: string,
   newPassword: string,
@@ -677,7 +621,7 @@ async function updateAttributes(
   });
 }
 
-async function verifyAttribute(
+export async function verifyAttribute(
   user: CognitoUser,
   attributeName: string,
   verificationCode: string,
@@ -695,7 +639,7 @@ async function verifyAttribute(
  * Disassociate any existing TOTP and generate a new secret key.
  * Can also be used for the MFA_SETUP challenge flow.
  */
-async function associateTotp(user: CognitoUser) {
+export async function associateTotp(user: CognitoUser) {
   return new Promise<string>((resolve, reject) => {
     rateLimit();
     user.associateSoftwareToken({
@@ -709,7 +653,7 @@ async function associateTotp(user: CognitoUser) {
  * Verify the TOTP code.
  * Use to complete the MFA_SETUP challenge flow.
  */
-async function verifyTotp(
+export async function verifyTotp(
   user: CognitoUser,
   {
     totpCode,
@@ -725,7 +669,7 @@ async function verifyTotp(
   });
 }
 
-async function respondToTotpChallenge(user: CognitoUser, totpCode: string) {
+export async function respondToTotpChallenge(user: CognitoUser, totpCode: string) {
   return new Promise<CognitoUserSession>((resolve, reject) => {
     rateLimit();
     user.sendMFACode(
@@ -739,7 +683,7 @@ async function respondToTotpChallenge(user: CognitoUser, totpCode: string) {
   });
 }
 
-async function sendCustomChallengeAnswer(
+export async function sendCustomChallengeAnswer(
   user: CognitoUser,
   answerChallenge: any,
 ) {
