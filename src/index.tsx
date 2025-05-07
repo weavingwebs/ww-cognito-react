@@ -15,7 +15,8 @@ export type AuthResult =
   | 'SUCCESS'
   | 'NEW_PASSWORD_REQUIRED'
   | 'TOTP_REQUIRED'
-  | 'MFA_SETUP';
+  | 'MFA_SETUP'
+  | 'CUSTOM_CHALLENGE';
 
 export type UserPoolConfig = { UserPoolId: string; ClientId: string };
 
@@ -67,6 +68,9 @@ type AuthStateAnon<User> = {
     friendlyDeviceName: string,
   ) => Promise<CognitoUserSession>;
   respondToTotpChallenge: (totpCode: string) => Promise<CognitoUserSession>;
+  sendCustomChallengeAnswer: (
+    answerChallenge: any,
+  ) => Promise<CognitoUserSession>;
 };
 type AuthStateLoggedIn<User> = Omit<AuthStateAnon<User>, 'isLoggedIn'> & {
   isLoggedIn: true;
@@ -284,6 +288,15 @@ export function createCognitoAuth<User extends object>(
           }
           return respondToTotpChallenge(cognitoUser, totpCode);
         },
+        sendCustomChallengeAnswer: async (answerChallenge: any) => {
+          const cognitoUser = userPool.getCurrentUser();
+          if (!cognitoUser) {
+            throw new Error(
+              'No active authentication, please refresh the page and try again',
+            );
+          }
+          return sendCustomChallengeAnswer(cognitoUser, answerChallenge);
+        }
       };
       if (!isLoggedIn) {
         return {
@@ -490,7 +503,8 @@ async function getSession(
 async function authenticate(user: CognitoUser, email: string, pass: string) {
   return new Promise<
     | { result: 'SUCCESS'; session: CognitoUserSession }
-    | { result: Exclude<AuthResult, 'SUCCESS'> }
+    | { result: 'CUSTOM_CHALLENGE'; challengeParameters: any }
+    | { result: Exclude<AuthResult, 'SUCCESS' | 'CUSTOM_CHALLENGE'> }
   >((resolve, reject) => {
     rateLimit();
     user.setAuthenticationFlowType('USER_SRP_AUTH');
@@ -513,6 +527,9 @@ async function authenticate(user: CognitoUser, email: string, pass: string) {
         },
         totpRequired: () => {
           resolve({ result: 'TOTP_REQUIRED' });
+        },
+        customChallenge: (challengeParameters) => {
+          resolve({ result: 'CUSTOM_CHALLENGE', challengeParameters })
         },
         onFailure: reject,
       },
@@ -719,6 +736,19 @@ async function respondToTotpChallenge(user: CognitoUser, totpCode: string) {
       },
       'SOFTWARE_TOKEN_MFA',
     );
+  });
+}
+
+async function sendCustomChallengeAnswer(
+  user: CognitoUser,
+  answerChallenge: any,
+) {
+  return new Promise<CognitoUserSession>((resolve, reject) => {
+    rateLimit();
+    user.sendCustomChallengeAnswer(answerChallenge, {
+      onSuccess: resolve,
+      onFailure: reject,
+    });
   });
 }
 
