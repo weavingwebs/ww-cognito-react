@@ -90,7 +90,7 @@ type AuthState<User> =
   | AuthStateAnon<User>
   | AuthStateLoggedIn<User>;
 
-type AuthenticateResult = { cognitoUser: CognitoUser } & (
+export type AuthenticateResult = { cognitoUser: CognitoUser } & (
   | { result: 'SUCCESS'; session: CognitoUserSession }
   | {
   result: 'NEW_PASSWORD_REQUIRED';
