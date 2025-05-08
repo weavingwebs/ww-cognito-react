@@ -74,6 +74,10 @@ type AuthStateLoggedIn<User> = Omit<AuthStateAnon<User>, 'isLoggedIn'> & {
     email: string,
   ) => Promise<{ verifyEmail: (verificationCode: string) => Promise<void> }>;
   associateTotp: () => Promise<string>;
+  verifyTotp: (
+    totpCode: string,
+    friendlyDeviceName: string,
+  ) => Promise<CognitoUserSession>;
 };
 
 type AuthState<User> =
@@ -523,6 +527,12 @@ export function createCognitoAuth<User extends object>(
         },
         associateTotp: async () => {
           return associateTotp(currentUser.cognitoUser);
+        },
+        verifyTotp: async (totpCode: string, friendlyDeviceName: string) => {
+          return verifyTotp(currentUser.cognitoUser, {
+            totpCode,
+            friendlyDeviceName,
+          });
         },
       };
     }, [isLoggedIn, currentUser, userPool, setUserSession]);
