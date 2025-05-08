@@ -1,22 +1,25 @@
 import * as React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AuthenticationDetails,
+  createContext,
+  FC,
+  PropsWithChildren,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
+import {
+  AuthenticationDetails, ChallengeName, ClientMetadata,
   CognitoUser,
   CognitoUserAttribute,
   CognitoUserPool,
-  CognitoUserSession,
+  CognitoUserSession, IAuthenticationCallback,
   ICognitoStorage,
   ICognitoUserAttributeData,
 } from 'amazon-cognito-identity-js';
 import * as qs from 'qs';
-
-export type AuthResult =
-  | 'SUCCESS'
-  | 'NEW_PASSWORD_REQUIRED'
-  | 'TOTP_REQUIRED'
-  | 'MFA_SETUP'
-  | 'CUSTOM_CHALLENGE';
 
 export type UserPoolConfig = { UserPoolId: string; ClientId: string };
 
@@ -25,12 +28,14 @@ export type BuildUserFn<User> = (
   attr: ICognitoUserAttributeData[],
 ) => User;
 
-export const defaultBuildUser: BuildUserFn<{id: string, email: string}> = (user, attr) => {
+export const defaultBuildUser: BuildUserFn<{ id: string; email: string }> = (
+  user,
+  attr,
+) => {
   let email: string | undefined;
   attr.forEach((a) => {
     switch (a.Name) {
-      case 'email':
-      {
+      case 'email': {
         email = a.Value;
         break;
       }
@@ -43,7 +48,7 @@ export const defaultBuildUser: BuildUserFn<{id: string, email: string}> = (user,
     id: user.getUsername(),
     email,
   };
-}
+};
 
 type AuthStateUnknown = { isLoggedIn: null };
 type AuthStateAnon<User> = {
@@ -56,6 +61,7 @@ type AuthStateAnon<User> = {
   ) => Promise<
     (verificationCode: string, newPassword: string) => Promise<void>
   >;
+  confirmResetPassword: ConfirmResetPasswordFn;
 };
 type AuthStateLoggedIn<User> = Omit<AuthStateAnon<User>, 'isLoggedIn'> & {
   isLoggedIn: true;
@@ -75,29 +81,156 @@ type AuthState<User> =
   | AuthStateAnon<User>
   | AuthStateLoggedIn<User>;
 
-export type AuthenticateResult = { cognitoUser: CognitoUser } & (
-  | { result: 'SUCCESS'; session: CognitoUserSession }
-  | {
+export type AuthResult =
+  | 'SUCCESS'
+  | 'NEW_PASSWORD_REQUIRED'
+  | 'MFA_REQUIRED'
+  | 'TOTP_REQUIRED'
+  | 'CUSTOM_CHALLENGE'
+  | 'MFA_SETUP'
+  | 'SELECT_MFA_TYPE';
+
+export type AuthenticationResultSuccess = {
+  result: 'SUCCESS';
+  session: CognitoUserSession;
+  userConfirmationNecessary?: boolean | undefined;
+};
+export type AuthenticationResultNewPasswordRequired = {
   result: 'NEW_PASSWORD_REQUIRED';
+  userAttributes: Record<string, string>;
+  requiredAttributes: Record<string, string>;
+};
+export type AuthenticationResultTotpRequired = {
+  result: 'TOTP_REQUIRED';
+  challengeName: ChallengeName;
+  challengeParameters: Record<string, string>;
+};
+export type AuthenticationResultMfaSetup = {
+  result: 'MFA_SETUP';
+  challengeName: ChallengeName;
+  challengeParameters: Record<string, string>;
+};
+export type AuthenticationResultMfa = {
+  result: 'MFA_REQUIRED' | 'SELECT_MFA_TYPE';
+  challengeName: ChallengeName;
+  challengeParameters: Record<string, string>;
+};
+export type AuthenticationResultCustomChallenge = {
+  result: 'CUSTOM_CHALLENGE';
+  challengeParameters: Record<string, string>;
+};
+
+export type AuthenticationResult =
+  | AuthenticationResultSuccess
+  | AuthenticationResultNewPasswordRequired
+  | AuthenticationResultTotpRequired
+  | AuthenticationResultMfaSetup
+  | AuthenticationResultMfa
+  | AuthenticationResultCustomChallenge;
+
+export type AuthenticateResult = {
+  cognitoUser: CognitoUser;
+} & (
+  | AuthenticationResultSuccess
+  | (AuthenticationResultNewPasswordRequired & {
   completeNewPasswordChallenge: CompleteNewPasswordChallengeFn;
-}
-  | { result: Exclude<AuthResult, 'SUCCESS' | 'NEW_PASSWORD_REQUIRED'> }
+})
+  | (AuthenticationResultTotpRequired & {
+  respondToTotpChallenge: RespondToTotpChallengeFn;
+})
+  | (AuthenticationResultMfaSetup & {
+  beginMfaSetupChallenge: BeginMfaSetupChallengeFn;
+  completeMfaSetupChallenge: CompleteMfaSetupChallengeFn;
+})
+  // @todo this needs splitting up & giving callbacks to support these properly.
+  | AuthenticationResultMfa
+  | (AuthenticationResultCustomChallenge & {
+  sendCustomChallengeAnswer: SendCustomChallengeAnswerFn;
+})
   );
 
 export type CompleteNewPasswordChallengeFn = (
   newPassword: string,
   attributes?: Record<string, string>,
-) => Promise<
-  | { result: 'SUCCESS'; session: CognitoUserSession }
-  | { result: Exclude<AuthResult, 'SUCCESS'> }
->;
+) => Promise<AuthenticateResult>;
+
+export type RespondToTotpChallengeFn = (
+  totpCode: string,
+) => Promise<AuthenticateResult>;
+
+export type BeginMfaSetupChallengeFn = () => Promise<{
+  cognitoUser: CognitoUser;
+  secret: string;
+}>;
+
+export type CompleteMfaSetupChallengeFn = (input: {
+  totpCode: string;
+  friendlyDeviceName: string;
+}) => Promise<AuthenticateResult>;
+
+export type SendCustomChallengeAnswerFn = (
+  answerChallenge: string,
+  clientMetaData?: ClientMetadata,
+) => Promise<AuthenticateResult>;
+
+export type ConfirmResetPasswordFn = (
+  email: string,
+  verificationCode: string,
+  newPassword: string,
+) => Promise<void>;
+
+function authenticateResultCallbacks(
+  resolve: (value: AuthenticationResult) => void,
+  reject: (reason?: string | Error) => void,
+): IAuthenticationCallback {
+  return {
+    onSuccess: (session, userConfirmationNecessary) =>
+      resolve({ result: 'SUCCESS', session, userConfirmationNecessary }),
+    onFailure: reject,
+    newPasswordRequired: (
+      userAttributes: Record<string, string>,
+      requiredAttributes: Record<string, string>,
+    ) =>
+      resolve({
+        result: 'NEW_PASSWORD_REQUIRED',
+        userAttributes,
+        requiredAttributes,
+      }),
+    mfaRequired: (
+      challengeName: ChallengeName,
+      challengeParameters: Record<string, string>,
+    ) =>
+      resolve({ result: 'MFA_REQUIRED', challengeName, challengeParameters }),
+    totpRequired: (
+      challengeName: ChallengeName,
+      challengeParameters: Record<string, string>,
+    ) =>
+      resolve({ result: 'TOTP_REQUIRED', challengeName, challengeParameters }),
+    customChallenge: (challengeParameters: Record<string, string>) =>
+      resolve({ result: 'CUSTOM_CHALLENGE', challengeParameters }),
+    mfaSetup: (
+      challengeName: ChallengeName,
+      challengeParameters: Record<string, string>,
+    ) => resolve({ result: 'MFA_SETUP', challengeName, challengeParameters }),
+    selectMFAType: (
+      challengeName: ChallengeName,
+      challengeParameters: Record<string, string>,
+    ) =>
+      resolve({
+        result: 'SELECT_MFA_TYPE',
+        challengeName,
+        challengeParameters,
+      }),
+  };
+}
 
 // Create cognito auth hooks bound to the User type.
 export function createCognitoAuth<User extends object>(
   buildUser: BuildUserFn<User>,
+  authFlow: 'USER_SRP_AUTH' | 'CUSTOM_AUTH' = 'USER_SRP_AUTH',
 ) {
   const useCognitoAuth = (config: UserPoolConfig, temporary?: boolean) => {
-    const storeRef = React.useRef<ICognitoStorage>(
+    const storeRef = useRef<ICognitoStorage>(
       temporary ? new MemoryCognitoStorage() : new StorageHelper().getStorage(),
     );
     const userPool = useMemo(
@@ -107,7 +240,7 @@ export function createCognitoAuth<User extends object>(
           ClientId: config.ClientId,
           Storage: storeRef.current,
         }),
-      [config.UserPoolId, config.ClientId, temporary],
+      [config.UserPoolId, config.ClientId, storeRef],
     );
     const [isLoggedIn, _setIsLoggedIn] = useState<boolean | null>(null);
     const [currentUser, _setCurrentUser] = useState<null | {
@@ -118,7 +251,7 @@ export function createCognitoAuth<User extends object>(
 
     // Keep a copy of the user in a ref so event handlers can access it without
     // needing to wait for the state to update.
-    const currentUserRef = React.useRef(currentUser);
+    const currentUserRef = useRef(currentUser);
 
     // Wrap up the getting of attributes & setting of state into one function.
     const setUserSession = useCallback(
@@ -156,7 +289,7 @@ export function createCognitoAuth<User extends object>(
         _setCurrentUser(newCurrentUser);
         currentUserRef.current = newCurrentUser;
       },
-      [_setCurrentUser, userPool],
+      [],
     );
 
     // Check if the user is logged in on mount.
@@ -176,6 +309,7 @@ export function createCognitoAuth<User extends object>(
           console.error('Error getting cognito auth session:', err);
           void setUserSession(null, null);
         });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [userPool]);
 
     // Build the memoized auth context.
@@ -191,45 +325,95 @@ export function createCognitoAuth<User extends object>(
       const anonCtx: AuthStateAnon<User> = {
         isLoggedIn: false,
         getUser: () => currentUserRef.current?.user ?? null,
-        authenticate: async (email: string, pass: string) => {
+        authenticate: async (email, pass) => {
           const cognitoUser = new CognitoUser({
             Username: email,
             Pool: userPool,
             Storage: storeRef.current,
           });
-          const res = await authenticate(cognitoUser, email, pass);
 
-          if (res.result === 'NEW_PASSWORD_REQUIRED') {
-            return {
-              result: 'NEW_PASSWORD_REQUIRED',
-              cognitoUser,
-              completeNewPasswordChallenge: async (
-                newPassword: string,
-                attributes: Record<string, string> = {},
-              ) => {
-                const res = await completeNewPasswordChallenge(
+          const handleResult = async (
+            authRes: AuthenticationResult,
+          ): Promise<AuthenticateResult> => {
+            // eslint-disable-next-line no-console
+            console.debug('Auth Result', authRes);
+            switch (authRes.result) {
+              case 'SUCCESS': {
+                await setUserSession(cognitoUser, authRes.session);
+                break;
+              }
+
+              case 'NEW_PASSWORD_REQUIRED': {
+                return {
+                  ...authRes,
                   cognitoUser,
-                  newPassword,
-                  attributes,
-                );
-                if (res.result === 'SUCCESS') {
-                  await setUserSession(cognitoUser, res.session);
-                }
-                return res;
-              },
-            };
-          }
-          if (res.result === 'SUCCESS') {
-            await setUserSession(cognitoUser, res.session);
+                  completeNewPasswordChallenge: async (
+                    newPassword: string,
+                    attributes: Record<string, string> = {},
+                  ) => {
+                    return handleResult(
+                      await completeNewPasswordChallenge(
+                        cognitoUser,
+                        newPassword,
+                        attributes,
+                      ),
+                    );
+                  },
+                };
+              }
+
+              case 'MFA_SETUP':
+                return {
+                  ...authRes,
+                  cognitoUser,
+                  beginMfaSetupChallenge: async () => {
+                    const secret = await associateTotp(cognitoUser);
+                    return { secret, cognitoUser };
+                  },
+                  completeMfaSetupChallenge: async (input) => {
+                    const session = await verifyTotp(cognitoUser, input);
+                    return handleResult({ result: 'SUCCESS', session });
+                  },
+                };
+
+              case 'TOTP_REQUIRED':
+                return {
+                  ...authRes,
+                  cognitoUser,
+                  respondToTotpChallenge: async (totpCode: string) => {
+                    return handleResult(
+                      await respondToTotpChallenge(cognitoUser, totpCode),
+                    );
+                  },
+                };
+
+              case 'CUSTOM_CHALLENGE':
+                return {
+                  ...authRes,
+                  cognitoUser,
+                  sendCustomChallengeAnswer: async (
+                    answerChallenge: string,
+                    clientMetaData?: ClientMetadata,
+                  ) => {
+                    return handleResult(
+                      await sendCustomChallengeAnswer(
+                        cognitoUser,
+                        answerChallenge,
+                        clientMetaData,
+                      ),
+                    );
+                  },
+                };
+            }
             return {
-              ...res,
+              ...authRes,
               cognitoUser,
             };
-          }
-          return {
-            result: res.result,
-            cognitoUser,
           };
+
+          return handleResult(
+            await authenticate(cognitoUser, email, pass, authFlow),
+          );
         },
         resetPassword: async (email: string) => {
           const cognitoUser = new CognitoUser({
@@ -238,6 +422,22 @@ export function createCognitoAuth<User extends object>(
             Storage: storeRef.current,
           });
           return resetPassword(cognitoUser);
+        },
+        confirmResetPassword: async (
+          email: string,
+          verificationCode: string,
+          newPassword: string,
+        ) => {
+          const cognitoUser = new CognitoUser({
+            Username: email,
+            Pool: userPool,
+            Storage: storeRef.current,
+          });
+          return confirmResetPassword(
+            cognitoUser,
+            verificationCode,
+            newPassword,
+          );
         },
       };
       if (!isLoggedIn) {
@@ -257,8 +457,7 @@ export function createCognitoAuth<User extends object>(
         let session: CognitoUserSession | null;
         try {
           session = await getSession(currentUserRef.current.cognitoUser);
-        }
-        catch (err) {
+        } catch (err) {
           // eslint-disable-next-line no-console
           console.error('Error getting session', err);
           return null;
@@ -326,21 +525,21 @@ export function createCognitoAuth<User extends object>(
           return associateTotp(currentUser.cognitoUser);
         },
       };
-    }, [isLoggedIn, currentUser]);
+    }, [isLoggedIn, currentUser, userPool, setUserSession]);
   };
 
-  const CognitoAuthContext = React.createContext<AuthState<User> | null>(null);
+  const CognitoAuthContext = createContext<AuthState<User> | null>(null);
 
   const useCognitoAuthContext = () => {
-    const ctx = React.useContext(CognitoAuthContext);
+    const ctx = useContext(CognitoAuthContext);
     if (!ctx) {
       throw new Error('CognitoAuthContext not initialised');
     }
     return ctx;
   };
 
-  const CognitoAuthProvider: React.FC<
-    React.PropsWithChildren<{ userPool: UserPoolConfig; temporary?: boolean }>
+  const CognitoAuthProvider: FC<
+    PropsWithChildren<{ userPool: UserPoolConfig; temporary?: boolean }>
   > = ({ userPool, temporary, children }) => {
     const state = useCognitoAuth(userPool, temporary);
     return (
@@ -442,39 +641,62 @@ async function getSession(
   });
 }
 
-async function authenticate(user: CognitoUser, email: string, pass: string) {
-  return new Promise<
-    | { result: 'SUCCESS'; session: CognitoUserSession }
-    | { result: 'CUSTOM_CHALLENGE'; challengeParameters: any }
-    | { result: Exclude<AuthResult, 'SUCCESS' | 'CUSTOM_CHALLENGE'> }
-  >((resolve, reject) => {
+async function authenticate(
+  cognitoUser: CognitoUser,
+  email: string,
+  pass: string,
+  authFlow: 'USER_SRP_AUTH' | 'CUSTOM_AUTH' = 'USER_SRP_AUTH',
+) {
+  return new Promise<AuthenticationResult>((resolve, reject) => {
     rateLimit();
-    user.setAuthenticationFlowType('USER_SRP_AUTH');
-    user.authenticateUser(
+    cognitoUser.setAuthenticationFlowType(authFlow);
+    cognitoUser.authenticateUser(
       new AuthenticationDetails({
         Username: email.trim(),
         Password: pass,
       }),
-      {
-        onSuccess: (session, userConfirmationNecessary) => {
-          console.debug('Cognito Auth success', {
-            session,
-            userConfirmationNecessary,
-          });
-          resolve({ result: 'SUCCESS', session });
-        },
-        newPasswordRequired: () => resolve({ result: 'NEW_PASSWORD_REQUIRED' }),
-        mfaSetup: () => {
-          resolve({ result: 'MFA_SETUP' });
-        },
-        totpRequired: () => {
-          resolve({ result: 'TOTP_REQUIRED' });
-        },
-        customChallenge: (challengeParameters) => {
-          resolve({ result: 'CUSTOM_CHALLENGE', challengeParameters })
-        },
-        onFailure: reject,
-      },
+      authenticateResultCallbacks(resolve, reject),
+    );
+  });
+}
+
+async function completeNewPasswordChallenge(
+  user: CognitoUser,
+  newPassword: string,
+  attributes: Record<string, string> = {},
+): Promise<AuthenticationResult> {
+  return new Promise((resolve, reject) => {
+    rateLimit();
+    user.completeNewPasswordChallenge(
+      newPassword,
+      attributes,
+      authenticateResultCallbacks(resolve, reject),
+    );
+  });
+}
+
+async function sendCustomChallengeAnswer(
+  user: CognitoUser,
+  answerChallenge: string,
+  clientMetaData?: ClientMetadata,
+) {
+  return new Promise<AuthenticationResult>((resolve, reject) => {
+    rateLimit();
+    user.sendCustomChallengeAnswer(
+      answerChallenge,
+      authenticateResultCallbacks(resolve, reject),
+      clientMetaData,
+    );
+  });
+}
+
+async function respondToTotpChallenge(user: CognitoUser, totpCode: string) {
+  return new Promise<AuthenticationResult>((resolve, reject) => {
+    rateLimit();
+    user.sendMFACode(
+      totpCode,
+      authenticateResultCallbacks(resolve, reject),
+      'SOFTWARE_TOKEN_MFA',
     );
   });
 }
@@ -498,31 +720,6 @@ async function getUserAttributes(
         resolve(result);
       },
     );
-  });
-}
-
-async function completeNewPasswordChallenge(
-  user: CognitoUser,
-  newPassword: string,
-  attributes: Record<string, string> = {},
-): Promise<
-  | { result: 'SUCCESS'; session: CognitoUserSession }
-  | { result: Exclude<AuthResult, 'SUCCESS'> }
-> {
-  return new Promise((resolve, reject) => {
-    rateLimit();
-    user.completeNewPasswordChallenge(newPassword, attributes, {
-      onSuccess: (session) => {
-        resolve({ result: 'SUCCESS', session });
-      },
-      onFailure: reject,
-      mfaSetup: () => {
-        resolve({ result: 'MFA_SETUP' });
-      },
-      totpRequired: () => {
-        resolve({ result: 'TOTP_REQUIRED' });
-      },
-    });
   });
 }
 
@@ -567,7 +764,7 @@ async function resetPassword(cognitoUser: CognitoUser) {
 
 // NOTE: You must call authenticate after successfully resetting the password
 // if you want to log the user in automatically.
-export async function confirmResetPassword(
+async function confirmResetPassword(
   cognitoUser: CognitoUser,
   verificationCode: string,
   newPassword: string,
@@ -669,41 +866,20 @@ export async function verifyTotp(
   });
 }
 
-export async function respondToTotpChallenge(user: CognitoUser, totpCode: string) {
-  return new Promise<CognitoUserSession>((resolve, reject) => {
-    rateLimit();
-    user.sendMFACode(
-      totpCode,
-      {
-        onSuccess: resolve,
-        onFailure: reject,
-      },
-      'SOFTWARE_TOKEN_MFA',
-    );
-  });
-}
-
-export async function sendCustomChallengeAnswer(
-  user: CognitoUser,
-  answerChallenge: any,
-) {
-  return new Promise<CognitoUserSession>((resolve, reject) => {
-    rateLimit();
-    user.sendCustomChallengeAnswer(answerChallenge, {
-      onSuccess: resolve,
-      onFailure: reject,
-    });
-  });
-}
-
 /**
  * Create a TOTP Uri for use with authenticator apps.
  * https://github.com/google/google-authenticator/wiki/Key-Uri-Format
  */
-export function buildTotpUri({accountName, secret, issuer}: {
-  accountName: string,
-  secret: string,
-  issuer: string,
+export function buildTotpUri({
+  accountName,
+  secret,
+  issuer,
+}: {
+  accountName: string;
+  secret: string;
+  issuer: string;
 }): string {
-  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(accountName)}?${qs.stringify({secret, issuer})}`;
+  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(
+    accountName,
+  )}?${qs.stringify({ secret, issuer })}`;
 }
