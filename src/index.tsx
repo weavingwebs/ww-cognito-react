@@ -21,7 +21,7 @@ import {
 } from 'amazon-cognito-identity-js';
 import * as qs from 'qs';
 
-export type UserPoolConfig = { UserPoolId: string; ClientId: string };
+export type UserPoolConfig = { UserPoolId: string; ClientId: string, AuthFlow?: 'USER_SRP_AUTH' | 'CUSTOM_AUTH' };
 
 export type BuildUserFn<User> = (
   user: CognitoUser,
@@ -231,7 +231,6 @@ function authenticateResultCallbacks(
 // Create cognito auth hooks bound to the User type.
 export function createCognitoAuth<User extends object>(
   buildUser: BuildUserFn<User>,
-  authFlow: 'USER_SRP_AUTH' | 'CUSTOM_AUTH' = 'USER_SRP_AUTH',
 ) {
   const useCognitoAuth = (config: UserPoolConfig, temporary?: boolean) => {
     const storeRef = useRef<ICognitoStorage>(
@@ -246,6 +245,7 @@ export function createCognitoAuth<User extends object>(
         }),
       [config.UserPoolId, config.ClientId, storeRef],
     );
+    const authFlow = config.AuthFlow ?? 'USER_SRP_AUTH';
     const [isLoggedIn, _setIsLoggedIn] = useState<boolean | null>(null);
     const [currentUser, _setCurrentUser] = useState<null | {
       session: CognitoUserSession;
