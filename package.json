@@ -1,6 +1,6 @@
 {
   "name": "@weavingwebs/ww-cognito-react",
-  "version": "2.2.2",
+  "version": "3.0.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
@@ -9,24 +9,38 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist/*"
+    "dist/*",
+    "legacy.js",
+    "legacy.d.ts"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./legacy": {
+      "types": "./dist/legacy.d.ts",
+      "default": "./dist/legacy.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
-    "watch": "tsc -w"
+    "watch": "tsc -w",
+    "test": "vitest run"
   },
   "dependencies": {
-    "amazon-cognito-identity-js": "^6.3.12",
-    "encoding": "^0.1.13",
+    "aws-amplify": "^6.20.0",
     "qs": "^6.12.3"
   },
   "peerDependencies": {
-    "react": "^16.9.0"
+    "react": "^16.9.0 || ^17.0.0 || ^18.0.0"
   },
   "devDependencies": {
     "@types/qs": "^6.9.15",
     "@types/react": "^18.3.3",
-    "typescript": "^5.5.3"
+    "react": "^18.3.1",
+    "typescript": "^5.5.3",
+    "vitest": "^4.1.11"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }
