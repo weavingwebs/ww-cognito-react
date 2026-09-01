@@ -6,6 +6,9 @@
     "registry": "https://npm.pkg.github.com/"
   },
   "repository": "git://github.com/weavingwebs/ww-cognito-react.git",
+  "engines": {
+    "node": ">=22"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
