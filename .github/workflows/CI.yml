@@ -6,6 +6,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check version bumped
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::package.json version $VERSION already has release tag v$VERSION - bump the version"
+            exit 1
+          fi
+          echo "Version $VERSION has no existing release tag, OK"
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
