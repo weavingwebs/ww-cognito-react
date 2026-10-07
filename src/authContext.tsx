@@ -11,6 +11,7 @@ import {
   type PropsWithChildren,
 } from 'react';
 import { Amplify } from 'aws-amplify';
+import { Hub } from 'aws-amplify/utils';
 import {
   confirmResetPassword as amplifyConfirmResetPassword,
   confirmUserAttribute,
@@ -26,6 +27,12 @@ import {
   verifyTOTPSetup,
 } from 'aws-amplify/auth';
 import { createMapSignInResult } from './mapSignInResult';
+import {
+  checkSessionOnMount,
+  isRefreshTokenRejected,
+  signInHandlingExistingSession,
+  type OnExistingSession,
+} from './sessionGuards';
 import type { AuthState, BuildUserFn, UserPoolConfig } from './types';
 
 function shallowEqual(a: object, b: object): boolean {
@@ -39,9 +46,9 @@ function shallowEqual(a: object, b: object): boolean {
   );
 }
 
-// Clears any local Amplify session regardless of app state - safe to call
-// even when not logged in, so callers always have a way to recover from a
-// stale session.
+// Calls Amplify signOut() (revokes the refresh token where applicable, then
+// clears local tokens) regardless of app state - safe to call even when not
+// logged in. Does not update AuthProvider state.
 export async function forceSignOut(): Promise<void> {
   try {
     await signOut();
@@ -139,23 +146,22 @@ export function createCognitoAuth<User extends object>(
         },
       });
 
-      fetchAuthSession()
-        .then((session) => {
-          if (version !== versionRef.current) return;
-          if (session.tokens) {
-            return loadUserFromSession().catch(async () => {
-              await forceSignOut();
-              if (version !== versionRef.current) return;
-              clearCurrentUser();
-            });
-          }
-          clearCurrentUser();
-        })
-        .catch(async () => {
-          await forceSignOut();
-          if (version !== versionRef.current) return;
-          clearCurrentUser();
-        });
+      // Never signOut on failure: a transient error at page load must not
+      // revoke the refresh token. See checkSessionOnMount.
+      checkSessionOnMount({
+        fetchSession: fetchAuthSession,
+        loadUser: loadUserFromSession,
+        clearCurrentUser,
+        isStale: () => version !== versionRef.current,
+      });
+
+      // Log the app out (state only, never signOut) when Amplify has cleared
+      // the tokens after a failed refresh - otherwise isLoggedIn stays true while getIdJwt() is null.
+      const stopListening = Hub.listen('auth', ({ payload }) => {
+        if (version !== versionRef.current) return;
+        if (isRefreshTokenRejected(payload)) clearCurrentUser();
+      });
+      return stopListening;
     }, [
       userPool.userPoolId,
       userPool.userPoolClientId,
@@ -169,36 +175,29 @@ export function createCognitoAuth<User extends object>(
     );
 
     const authenticate = useCallback(
-      async (email: string, pass: string) => {
+      async (
+        email: string,
+        pass: string,
+        opts?: { onExistingSession?: OnExistingSession },
+      ) => {
         const authFlowType = userPool.authFlowType ?? 'USER_SRP_AUTH';
-        const doSignIn = () =>
-          signIn({
-            username: email.trim(),
-            password: pass,
-            options: { authFlowType },
-          });
-
-        let result;
-        try {
-          result = await doSignIn();
-        } catch (err) {
-          // Amplify refuses to sign in if it thinks a session is already
-          // active, even if our app state disagrees (e.g. a stale local
-          // session left behind by a failed session check). Force a sign
-          // out and retry once rather than surfacing this to the user.
-          if (
-            err instanceof Error &&
-            err.name === 'UserAlreadyAuthenticatedException'
-          ) {
-            await forceSignOut();
-            result = await doSignIn();
-          } else {
-            throw err;
-          }
-        }
+        // Amplify refuses to sign in if it thinks a session is already
+        // active, even if our app state disagrees (e.g. a stale local
+        // session). See signInHandlingExistingSession.
+        const result = await signInHandlingExistingSession(
+          () =>
+            signIn({
+              username: email.trim(),
+              password: pass,
+              options: { authFlowType },
+            }),
+          forceSignOut,
+          opts?.onExistingSession,
+          loadUserFromSession,
+        );
         return mapSignInResult(result);
       },
-      [userPool.authFlowType, mapSignInResult],
+      [userPool.authFlowType, mapSignInResult, loadUserFromSession],
     );
 
     const getIdJwt = useCallback(async (): Promise<string | null> => {

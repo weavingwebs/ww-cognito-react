@@ -1,6 +1,6 @@
 {
   "name": "@weavingwebs/ww-cognito-react",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
@@ -27,8 +27,9 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "watch": "tsc -w",
+    "build": "tsc -p tsconfig.build.json",
+    "watch": "tsc -p tsconfig.build.json -w",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {

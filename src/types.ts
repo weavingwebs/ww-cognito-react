@@ -1,3 +1,4 @@
+import type { OnExistingSession } from './sessionGuards';
 import type { AuthUser, FetchUserAttributesOutput } from 'aws-amplify/auth';
 
 export type UserPoolConfig = {
@@ -61,7 +62,11 @@ export type AuthStateUnknown = { isLoggedIn: null };
 
 export type AuthStateAnon = {
   isLoggedIn: false;
-  authenticate: (email: string, pass: string) => Promise<AuthenticateResult>;
+  authenticate: (
+    email: string,
+    pass: string,
+    opts?: { onExistingSession?: OnExistingSession },
+  ) => Promise<AuthenticateResult>;
   resetPassword: (email: string) => Promise<void>;
   confirmResetPassword: (
     email: string,
@@ -82,7 +87,11 @@ export type AuthStateLoggedIn<User> = {
   ) => Promise<{ verifyEmail: (code: string) => Promise<void> }>;
   associateTotp: () => Promise<string>;
   verifyTotp: (totpCode: string, friendlyDeviceName: string) => Promise<void>;
-  authenticate: (email: string, pass: string) => Promise<AuthenticateResult>;
+  authenticate: (
+    email: string,
+    pass: string,
+    opts?: { onExistingSession?: OnExistingSession },
+  ) => Promise<AuthenticateResult>;
   resetPassword: (email: string) => Promise<void>;
   confirmResetPassword: (
     email: string,
