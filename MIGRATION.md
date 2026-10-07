@@ -1,5 +1,7 @@
 # Migrating from v2 to v3
 
+Upgrading 3.0.x -> 3.1.0: no API changes required (`authenticate(email, pass)` keeps its 3.0 default); see CHANGELOG 3.1.0 "Behaviour changes".
+
 v3 replaces the underlying SDK (`amazon-cognito-identity-js` -> `aws-amplify`). There are two migration
 paths - pick whichever fits your app.
 
