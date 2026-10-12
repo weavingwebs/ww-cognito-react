@@ -1,3 +1,4 @@
+import { reauthError, REAUTH_NOT_LOGGED_IN_EXCEPTION } from './reauth';
 import * as React from 'react';
 import {
   createContext,
@@ -20,20 +21,21 @@ import {
   getCurrentUser,
   resetPassword as amplifyResetPassword,
   setUpTOTP,
-  signIn,
   signOut,
   updatePassword,
   updateUserAttributes,
   verifyTOTPSetup,
 } from 'aws-amplify/auth';
+import { authenticateWith, reauthenticateWith } from './authenticate';
+import { claimsFromSession } from './claims';
 import { createMapSignInResult } from './mapSignInResult';
-import {
-  checkSessionOnMount,
-  isRefreshTokenRejected,
-  signInHandlingExistingSession,
-  type OnExistingSession,
-} from './sessionGuards';
-import type { AuthState, BuildUserFn, UserPoolConfig } from './types';
+import { checkSessionOnMount, isRefreshTokenRejected } from './sessionGuards';
+import type {
+  AuthenticateOptions,
+  AuthState,
+  BuildUserFn,
+  UserPoolConfig,
+} from './types';
 
 function shallowEqual(a: object, b: object): boolean {
   const aKeys = Object.keys(a);
@@ -56,6 +58,13 @@ export async function forceSignOut(): Promise<void> {
     // eslint-disable-next-line no-console
     console.error('[ww-cognito-react] forceSignOut failed', err);
   }
+}
+
+function authTimeOf(
+  session: Awaited<ReturnType<typeof fetchAuthSession>> | undefined,
+): number | undefined {
+  const authTime = session?.tokens?.idToken?.payload.auth_time;
+  return typeof authTime === 'number' ? authTime : undefined;
 }
 
 type CurrentUser<User> = {
@@ -178,24 +187,17 @@ export function createCognitoAuth<User extends object>(
       async (
         email: string,
         pass: string,
-        opts?: { onExistingSession?: OnExistingSession },
+        opts?: AuthenticateOptions,
       ) => {
-        const authFlowType = userPool.authFlowType ?? 'USER_SRP_AUTH';
-        // Amplify refuses to sign in if it thinks a session is already
-        // active, even if our app state disagrees (e.g. a stale local
-        // session). See signInHandlingExistingSession.
-        const result = await signInHandlingExistingSession(
-          () =>
-            signIn({
-              username: email.trim(),
-              password: pass,
-              options: { authFlowType },
-            }),
-          forceSignOut,
-          opts?.onExistingSession,
+        return authenticateWith({
+          email,
+          pass,
+          opts,
+          authFlowType: userPool.authFlowType ?? 'USER_SRP_AUTH',
+          mapSignInResult,
           loadUserFromSession,
-        );
-        return mapSignInResult(result);
+          forceSignOut,
+        });
       },
       [userPool.authFlowType, mapSignInResult, loadUserFromSession],
     );
@@ -222,6 +224,32 @@ export function createCognitoAuth<User extends object>(
       await signOut();
       clearCurrentUser();
     }, [clearCurrentUser]);
+
+    const refreshSession = useCallback(async (): Promise<void> => {
+      await fetchAuthSession({ forceRefresh: true });
+      await loadUserFromSession();
+    }, [loadUserFromSession]);
+
+    const reauthenticate = useCallback(
+      async (pass: string, opts?: { clientMetadata?: Record<string, string> }) => {
+        // NOTE: the session's own username, so it can only ever be this user.
+        const username = currentUserRef.current?.authUser.username;
+        if (!username) {
+          throw reauthError(REAUTH_NOT_LOGGED_IN_EXCEPTION, 'Not logged in');
+        }
+        return reauthenticateWith({
+          username,
+          pass,
+          clientMetadata: opts?.clientMetadata,
+          authFlowType: userPool.authFlowType ?? 'USER_SRP_AUTH',
+          mapSignInResult,
+          tabUsername: () => currentUserRef.current?.authUser.username,
+          startAuthTime: authTimeOf(currentUserRef.current?.session),
+          clearTabUser: clearCurrentUser,
+        });
+      },
+      [userPool.authFlowType, mapSignInResult, clearCurrentUser],
+    );
 
     const changePassword = useCallback(
       async (oldPwd: string, newPwd: string): Promise<void> => {
@@ -295,6 +323,9 @@ export function createCognitoAuth<User extends object>(
       return {
         isLoggedIn: true,
         user: currentUser.user,
+        ...claimsFromSession(currentUser.session),
+        refreshSession,
+        reauthenticate,
         getAccessJwt,
         getIdJwt,
         logout,
@@ -314,6 +345,8 @@ export function createCognitoAuth<User extends object>(
       confirmResetPassword,
       getAccessJwt,
       getIdJwt,
+      refreshSession,
+      reauthenticate,
       logout,
       changePassword,
       updateEmail,

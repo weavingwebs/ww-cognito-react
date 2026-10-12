@@ -1,16 +1,38 @@
 import { confirmSignIn, signIn } from 'aws-amplify/auth';
+import type { ReauthGuard } from './reauth';
 import type { AuthenticateResult } from './types';
 
 type SignInOutput = Awaited<ReturnType<typeof signIn>>;
+type ClientMetadata = Record<string, string>;
 
 // Extracted as a factory (rather than a free function) so it's unit-testable
 // without a React tree - loadUserFromSession is the one piece of state it
 // needs from the provider.
+//
+// `clientMetadata` is the exchange's metadata: Cognito does not carry it
+// between calls, so it is resent on every confirmSignIn. A per-call override
+// (new password / custom answer) replaces it for that call and the rest of
+// the exchange.
+// `guard` is the re-authentication guard (reauthenticate only), threaded
+// through every step of the exchange: it refuses a step, or a success, once the
+// tab has logged out or the attempt has been superseded.
 export function createMapSignInResult(loadUserFromSession: () => Promise<unknown>) {
   const mapSignInResult = async (
     output: SignInOutput,
+    clientMetadata?: ClientMetadata,
+    guard?: ReauthGuard,
   ): Promise<AuthenticateResult> => {
+    // Runs one confirmSignIn and maps the next step.
+    const continueExchange = async (
+      confirm: (metadata: ClientMetadata | undefined) => ReturnType<typeof confirmSignIn>,
+      metadata: ClientMetadata | undefined,
+    ): Promise<AuthenticateResult> => {
+      await guard?.beforeStep();
+      return mapSignInResult(await confirm(metadata), metadata, guard);
+    };
+
     if (output.isSignedIn) {
+      await guard?.beforeSuccess();
       await loadUserFromSession();
       return { result: 'SUCCESS' };
     }
@@ -21,12 +43,21 @@ export function createMapSignInResult(loadUserFromSession: () => Promise<unknown
       case 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED':
         return {
           result: 'NEW_PASSWORD_REQUIRED',
-          completeNewPasswordChallenge: async (newPassword, attributes = {}) =>
-            mapSignInResult(
-              await confirmSignIn({
-                challengeResponse: newPassword,
-                options: { userAttributes: attributes },
-              }),
+          completeNewPasswordChallenge: async (
+            newPassword,
+            attributes = {},
+            override,
+          ) =>
+            continueExchange(
+              (metadata) =>
+                confirmSignIn({
+                  challengeResponse: newPassword,
+                  options: {
+                    userAttributes: attributes,
+                    ...(metadata ? { clientMetadata: metadata } : {}),
+                  },
+                }),
+              override ?? clientMetadata,
             ),
         };
 
@@ -34,7 +65,14 @@ export function createMapSignInResult(loadUserFromSession: () => Promise<unknown
         return {
           result: 'TOTP_REQUIRED',
           respondToTotpChallenge: async (totpCode) =>
-            mapSignInResult(await confirmSignIn({ challengeResponse: totpCode })),
+            continueExchange(
+              (metadata) =>
+                confirmSignIn({
+                  challengeResponse: totpCode,
+                  options: metadata ? { clientMetadata: metadata } : undefined,
+                }),
+              clientMetadata,
+            ),
         };
 
       case 'CONTINUE_SIGN_IN_WITH_TOTP_SETUP': {
@@ -43,11 +81,16 @@ export function createMapSignInResult(loadUserFromSession: () => Promise<unknown
           result: 'MFA_SETUP',
           beginMfaSetupChallenge: async () => ({ secret }),
           completeMfaSetupChallenge: async (totpCode, friendlyDeviceName) =>
-            mapSignInResult(
-              await confirmSignIn({
-                challengeResponse: totpCode,
-                options: { friendlyDeviceName },
-              }),
+            continueExchange(
+              (metadata) =>
+                confirmSignIn({
+                  challengeResponse: totpCode,
+                  options: {
+                    friendlyDeviceName,
+                    ...(metadata ? { clientMetadata: metadata } : {}),
+                  },
+                }),
+              clientMetadata,
             ),
         };
       }
@@ -56,12 +99,14 @@ export function createMapSignInResult(loadUserFromSession: () => Promise<unknown
         return {
           result: 'CUSTOM_CHALLENGE',
           challengeParameters: output.nextStep.additionalInfo ?? {},
-          sendCustomChallengeAnswer: async (answerChallenge, clientMetadata) =>
-            mapSignInResult(
-              await confirmSignIn({
-                challengeResponse: answerChallenge,
-                options: clientMetadata ? { clientMetadata } : undefined,
-              }),
+          sendCustomChallengeAnswer: async (answerChallenge, override) =>
+            continueExchange(
+              (metadata) =>
+                confirmSignIn({
+                  challengeResponse: answerChallenge,
+                  options: metadata ? { clientMetadata: metadata } : undefined,
+                }),
+              override ?? clientMetadata,
             ),
         };
 

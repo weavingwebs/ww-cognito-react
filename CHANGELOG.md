@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.2.0
+
+All additive. `authenticate(email, pass)` makes the same Amplify calls as in 3.1.0 and its existing option
+(`onExistingSession`) is unchanged, so s4a and hermes need no code changes. Things to be aware of:
+- Requires `aws-amplify` `~6.22.1` (was `^6.20.0`): `reauthenticate` uses its `createAmplifyContext` and depends on
+  Amplify internals, so only the tested minor is allowed; bump deliberately, with `yarn test` as the gate.
+- A per-call `clientMetadata` override passed to `sendCustomChallengeAnswer` / `completeNewPasswordChallenge` now
+  carries on to the later steps of the exchange (in 3.1.0 later steps without the argument sent nothing). No
+  current consumer passes one.
+- Amplify keeps one global sign-in state, so a challenge callback from an older `authenticate`/`reauthenticate`
+  now throws `ReauthAbortedException` once a newer attempt has started (before, it would have answered the newer
+  attempt's challenge). Only the steps are refused: a plain sign-in that Amplify completes is always loaded.
+- `reauthenticate` on a logged-out tab throws `ReauthNotLoggedInException` (`isReauthNotLoggedInError`).
+- `AuthStateLoggedIn` gains required fields (`emailVerified`, `mfaEnrolled`, `mfaRequired`, `refreshSession`,
+  `reauthenticate`), so a hand-written object typed as it (e.g. a test mock) needs them.
+
+### Added
+
+- **`reauthenticate(pass, opts?: { clientMetadata })`** on the signed-in state: signs the current user in again
+  without signing out (e.g. to reset the ID token's `auth_time`, or to add an MFA factor). Returns the same
+  challenge chain as `authenticate`. The live session is untouched unless the attempt succeeds. See the README
+  ("Re-authentication"). Throws `ReauthAbortedException` (`isReauthAbortedError`, `REAUTH_ABORTED_EXCEPTION`) if the
+  tab logged out, the user changed or a newer attempt started, and `ReauthNotFreshException`
+  (`isReauthNotFreshError`, `REAUTH_NOT_FRESH_EXCEPTION`) if the new session's `auth_time` did not advance.
+- **`authenticate(email, pass, opts?: AuthenticateOptions)`** (`AuthenticateOptions` is exported):
+  - `clientMetadata?: Record<string, string>` - sent with the sign-in and re-sent on every `confirmSignIn` of the
+    exchange (new password, TOTP, MFA setup, custom challenge), because Cognito does not carry it between
+    calls. `completeNewPasswordChallenge(newPassword, attributes?, clientMetadata?)` and
+    `sendCustomChallengeAnswer(answer, clientMetadata?)` take an optional override, which replaces the metadata
+    for that call and the rest of the exchange.
+- **ID token claims on the signed-in state**, beside `user` (not inside it, so `user` identity is unchanged):
+  `emailVerified: boolean | undefined`, `mfaEnrolled: boolean`, `mfaRequired: boolean`. `'true'`/`true` and
+  `'false'`/`false` are parsed; anything else is `false` (`undefined` for `emailVerified`). UI hints only: never
+  gate anything on them.
+- **`refreshSession()`** on the signed-in state: forces a token refresh then reloads the user and claims. A refresh
+  is not a re-authentication: the ID token keeps its original `auth_time` (measured against a Cognito pool: `iat`/`exp`
+  move, `auth_time` does not).
+
 ## 3.1.0
 
 ### Added (additive)
