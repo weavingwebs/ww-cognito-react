@@ -1,5 +1,58 @@
 # Changelog
 
+## 3.2.0
+
+All additive. `authenticate(email, pass)` makes the same Amplify calls as in 3.1.0 and its existing option
+(`onExistingSession`) is unchanged, so s4a and hermes need no code changes. Things to be aware of:
+- `logout()` and `forceSignOut()` first roll back a pending re-auth attempt, which only exists if an app opts in.
+- A per-call `clientMetadata` override passed to `sendCustomChallengeAnswer` / `completeNewPasswordChallenge` now
+  carries on to the later steps of the exchange (in 3.1.0 later steps without the argument sent nothing). No
+  current consumer passes one.
+- `AuthStateLoggedIn` gains required fields (`emailVerified`, `mfaEnrolled`, `mfaRequired`, `refreshSession`), so a
+  hand-written object typed as it (e.g. a test mock) needs them.
+
+### Added
+
+- **`authenticate(email, pass, opts?: AuthenticateOptions)`** (`AuthenticateOptions` is exported):
+  - `clientMetadata?: Record<string, string>` - sent with the sign-in and re-sent on every `confirmSignIn` of the
+    exchange (new password, TOTP, MFA setup, custom challenge), because Cognito does not carry it between
+    calls. `completeNewPasswordChallenge(newPassword, attributes?, clientMetadata?)` and
+    `sendCustomChallengeAnswer(answer, clientMetadata?)` take an optional override, which replaces the metadata
+    for that call and the rest of the exchange.
+  - `allowWhileLoggedIn?: boolean` - re-authenticate while signed in (e.g. to refresh the ID token's
+    `auth_time`, or to add an MFA factor) without signing out. The attempt runs against a private in-memory
+    token store; nothing is written to the real storage unless it succeeds, so a wrong answer or abandoned
+    challenge cannot affect the live session in this or any other tab. A rollback during an in-flight Cognito
+    call is deferred until it settles and its result discarded. Rolls back by itself after 5 minutes idle.
+    A mistyped TOTP / MFA-setup code or weak new password (`CodeMismatchException`, `EnableSoftwareTokenMFAException`,
+    `InvalidPasswordException`) does not end the attempt: retry the same step. Any other step failure does. Bypasses `onExistingSession` entirely. Must be the
+    signed-in user (compared by Cognito username, not email): a different user rolls back and throws
+    `ReauthUserMismatchException` (`isReauthUserMismatchError()`, `REAUTH_USER_MISMATCH_EXCEPTION`); the real store
+    is re-checked at commit so a session changed by another tab meanwhile is not overwritten. A rolled-back
+    attempt's callbacks throw `ReauthAttemptEndedException` (`isReauthAttemptEndedError()`). With no
+    session it behaves like a plain login. See the README ("Re-authentication").
+  - `signal?: AbortSignal` - an already-aborted signal installs no guard; aborting mid-attempt rolls it back.
+- **`rollbackPendingReauth()`** and **`clearPersistedSignInState()`** exports, for apps that abandon a challenge
+  step. The latter removes only `CognitoSignInState*` keys from `sessionStorage`.
+- **ID token claims on the signed-in state**, beside `user` (not inside it, so `user` identity is unchanged):
+  `emailVerified: boolean | undefined`, `mfaEnrolled: boolean`, `mfaRequired: boolean`. `'true'`/`true` and
+  `'false'`/`false` are parsed; anything else is `false` (`undefined` for `emailVerified`). UI hints only: never
+  gate anything on them.
+- **`refreshSession()`** on the signed-in state: forces a token refresh then reloads the user and claims. A refresh
+  is not a re-authentication: the ID token keeps its original `auth_time` (measured against a Cognito pool: `iat`/`exp`
+  move, `auth_time` does not).
+
+### Behaviour while a re-auth attempt is active
+
+- `getIdJwt()` / `getAccessJwt()` serve the live session's tokens as they were when the attempt started, until
+  they expire (then `null`); they are never refreshed during the attempt. After commit they return the new tokens.
+- Hub `tokenRefresh_failure` events are ignored while the attempt is active; on rollback the real session is
+  re-checked so a genuine failure in that window is not lost.
+- `refreshSession()` throws. Other calls that need the session (`changePassword`, `updateEmail`, ...) see no
+  session until the attempt ends.
+- Challenge callbacks of a rolled-back attempt throw `ReauthAttemptEndedException` instead of reaching Cognito.
+- A plain `authenticate()` while an attempt is active throws; do not call `Amplify.configure` mid-attempt.
+
 ## 3.1.0
 
 ### Added (additive)

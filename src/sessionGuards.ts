@@ -107,6 +107,16 @@ export function isRefreshTokenRejected(payload: {
   );
 }
 
+// During a re-auth attempt this tab reads the private store, so a refresh
+// failure event says nothing about the real session and must not log the app
+// out (it is re-checked when the attempt rolls back).
+export function shouldLogOutOnHubEvent(
+  payload: { event: string; data?: unknown },
+  reauthActive: boolean,
+): boolean {
+  return !reauthActive && isRefreshTokenRejected(payload);
+}
+
 // Mount-time session check. A failure at any step never signs out (that
 // revokes the refresh token). If loading the user fails with an error for
 // which Amplify itself would clear tokens (e.g. the access token was revoked
@@ -138,4 +148,38 @@ export async function checkSessionOnMount(deps: {
     }
   }
   clearCurrentUser();
+}
+
+// Run after a re-auth attempt is rolled back. While the guard was active the
+// Hub tokenRefresh_failure handler was ignored (this tab was reading the
+// private store), so a genuine failure of the REAL session in that window was
+// dropped. Ask Amplify what the real session is now; log the app out only on a
+// positive "no tokens" or a token-clearing error, never on a transient one.
+export async function checkSessionAfterReauth(deps: {
+  fetchSession: () => Promise<{ tokens?: unknown }>;
+  clearCurrentUser: () => void;
+  isStale: () => boolean;
+}): Promise<void> {
+  try {
+    const session = await deps.fetchSession();
+    if (deps.isStale()) return;
+    if (!session.tokens) deps.clearCurrentUser();
+  } catch (err) {
+    if (deps.isStale()) return;
+    if (isTokenClearingError(err)) deps.clearCurrentUser();
+  }
+}
+
+// refreshSession(): force a token refresh, then reload the user and claims.
+// Refused during a re-auth attempt, when the provider reads the private store.
+export async function refreshAndReload(deps: {
+  reauthActive: boolean;
+  refresh: () => Promise<unknown>;
+  reload: () => Promise<unknown>;
+}): Promise<void> {
+  if (deps.reauthActive) {
+    throw new Error('Cannot refresh the session during a re-auth attempt');
+  }
+  await deps.refresh();
+  await deps.reload();
 }
