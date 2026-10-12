@@ -41,23 +41,13 @@ export type SendCustomChallengeAnswerFn = (
 ) => Promise<AuthenticateResult>;
 
 export type AuthenticateOptions = {
-  /** What to do if a session already exists. Ignored when `allowWhileLoggedIn` is set. */
+  /** What to do if a session already exists. */
   onExistingSession?: OnExistingSession;
   /**
    * Sent with the sign-in and re-sent on every step of the exchange (Cognito
    * does not carry it between calls), e.g. `{ mfaAction: 'setup' }`.
    */
   clientMetadata?: Record<string, string>;
-  /**
-   * Re-authenticate while signed in without touching the live session unless
-   * the attempt succeeds (see README, "Re-authentication"). Bypasses
-   * `onExistingSession`. Must be the signed-in user; see
-   * `isReauthUserMismatchError`. With no session it behaves like a plain
-   * login.
-   */
-  allowWhileLoggedIn?: boolean;
-  /** Aborting (e.g. on unmount) ends a pending `allowWhileLoggedIn` attempt. */
-  signal?: AbortSignal;
 };
 
 export type AuthenticateResult =
@@ -113,10 +103,18 @@ export type AuthStateLoggedIn<User> = {
   mfaRequired: boolean;
   /**
    * Forces a token refresh then reloads the user and claims, e.g. after MFA
-   * enrolment. The refreshed ID token keeps its original `auth_time` (measured against a Cognito pool: `iat`/`exp` move, `auth_time` does not), so this is not a re-authentication. Throws
-   * during an `allowWhileLoggedIn` attempt.
+   * enrolment. NOTE: not a re-authentication, the refreshed ID token keeps its
+   * original `auth_time` (use `reauthenticate`).
    */
   refreshSession: () => Promise<void>;
+  /**
+   * Signs the current user in again without signing out, e.g. to get a fresh
+   * `auth_time`. The live session is untouched unless the attempt succeeds.
+   */
+  reauthenticate: (
+    pass: string,
+    opts?: { clientMetadata?: Record<string, string> },
+  ) => Promise<AuthenticateResult>;
   logout: () => Promise<void>;
   changePassword: (oldPwd: string, newPwd: string) => Promise<void>;
   updateEmail: (

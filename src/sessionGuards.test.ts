@@ -11,12 +11,9 @@ vi.mock('aws-amplify/auth/cognito', () => ({
 
 import { fetchAuthSession } from 'aws-amplify/auth';
 import {
-  checkSessionAfterReauth,
   checkSessionOnMount,
   isAlreadySignedInError,
   isRefreshTokenRejected,
-  refreshAndReload,
-  shouldLogOutOnHubEvent,
   signInHandlingExistingSession,
 } from './sessionGuards';
 
@@ -208,73 +205,5 @@ describe('checkSessionOnMount', () => {
     });
     await checkSessionOnMount(d);
     expect(d.clearCurrentUser).not.toHaveBeenCalled();
-  });
-});
-
-describe('shouldLogOutOnHubEvent', () => {
-  const failure = (name: string) => ({
-    event: 'tokenRefresh_failure',
-    data: { error: Object.assign(new Error('x'), { name }) },
-  });
-
-  it('logs out on a token-clearing refresh failure when no re-auth is active', () => {
-    expect(shouldLogOutOnHubEvent(failure('NotAuthorizedException'), false)).toBe(true);
-  });
-
-  it('ignores the same failure while a re-auth attempt is active', () => {
-    expect(shouldLogOutOnHubEvent(failure('NotAuthorizedException'), true)).toBe(false);
-  });
-
-  it('ignores transient failures', () => {
-    expect(shouldLogOutOnHubEvent(failure('NetworkError'), false)).toBe(false);
-  });
-});
-
-describe('checkSessionAfterReauth', () => {
-  const run = (fetchSession: () => Promise<{ tokens?: unknown }>, isStale = () => false) => {
-    const clearCurrentUser = vi.fn();
-    return checkSessionAfterReauth({ fetchSession, clearCurrentUser, isStale }).then(
-      () => clearCurrentUser,
-    );
-  };
-
-  it('keeps state when the real session is still there', async () => {
-    expect(await run(async () => ({ tokens: {} }))).not.toHaveBeenCalled();
-  });
-
-  it('clears state when there are no tokens', async () => {
-    expect(await run(async () => ({}))).toHaveBeenCalledOnce();
-  });
-
-  it('clears on a token-clearing error but keeps state on a transient one', async () => {
-    const named = (name: string) => async () => {
-      throw Object.assign(new Error('x'), { name });
-    };
-    expect(await run(named('NotAuthorizedException'))).toHaveBeenCalledOnce();
-    expect(await run(named('NetworkError'))).not.toHaveBeenCalled();
-  });
-
-  it('does nothing when stale', async () => {
-    expect(await run(async () => ({}), () => true)).not.toHaveBeenCalled();
-  });
-});
-
-describe('refreshAndReload', () => {
-  it('forces a refresh then reloads, in that order', async () => {
-    const calls: string[] = [];
-    await refreshAndReload({
-      reauthActive: false,
-      refresh: async () => void calls.push('refresh'),
-      reload: async () => void calls.push('reload'),
-    });
-    expect(calls).toEqual(['refresh', 'reload']);
-  });
-
-  it('throws during a re-auth attempt without refreshing', async () => {
-    const refresh = vi.fn();
-    await expect(
-      refreshAndReload({ reauthActive: true, refresh, reload: vi.fn() }),
-    ).rejects.toThrow('re-auth attempt');
-    expect(refresh).not.toHaveBeenCalled();
   });
 });

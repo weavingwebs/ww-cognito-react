@@ -29,6 +29,10 @@ export { useAuthContext, useAuthContextOrDie, AuthContext, AuthProvider, forceSi
 conditionally omit a field, and never mutate/reuse a previous return value - see "Stable user identity"
 below for why.
 
+Do not use `authUser.signInDetails.loginId` in `buildUser`. It is not a user attribute, just the string that was
+passed to Amplify's `signIn` last time: the email as typed at login (stale after `updateEmail`), or the Cognito
+username after `reauthenticate`. Use `attributes.email` and `authUser.userId` / `authUser.username` instead.
+
 ## MFA preference and existing sessions (3.1.0)
 
 ```ts
@@ -64,62 +68,28 @@ email entered (the password is not checked), so check `user` if that matters. If
 ## Re-authentication, `clientMetadata` and claims (3.2.0)
 
 ```ts
-// Re-authenticate the signed-in user (e.g. to add an MFA factor) without touching the live session
-// unless it succeeds.
-const ac = new AbortController(); // abort on unmount
-const res = await auth.authenticate(user.email, password, {
-  allowWhileLoggedIn: true,
+// Sign the current user in again (e.g. for a fresh `auth_time`) without signing out.
+const res = await auth.reauthenticate(password, {
   clientMetadata: { mfaAction: 'setup' }, // re-sent on every step
-  signal: ac.signal,
 });
-// ...walk the challenge chain as usual; call rollbackPendingReauth() if the user abandons it.
+// ...walk the challenge chain exactly as for authenticate().
 ```
 
-**`allowWhileLoggedIn`.** Amplify refuses to sign in while usable tokens exist. With this flag the attempt runs
-against a private in-memory token store, and only a successful attempt copies its tokens into the real
-(shared `localStorage`) storage. Consequences:
+**`reauthenticate`.** Amplify refuses to sign in while a session exists; this skips that one check. The live session
+is untouched and fully usable until the attempt succeeds, when Amplify stores the new tokens over it. A wrong
+password, failed step or abandoned challenge needs no clean-up.
 
-- A wrong answer, a failed step or an abandoned challenge rolls back; nothing is written to or cleared from the
-  live session in any tab. (The one read of the real store is a `fetchAuthSession()` at the start, which may
-  refresh the live tokens as it normally would.) A failed challenge step ends the attempt (the user
-  restarts from the password), except `CodeMismatchException`, `InvalidPasswordException` and
-  `EnableSoftwareTokenMFAException` (a mistyped code / weak new password): Cognito keeps the session, so the
-  same callback can be called again. A custom-challenge failure is always terminal.
-- A rollback that lands while a Cognito call is in flight (modal closed, abort, logout) is deferred until that
-  call settles, and the call's result is discarded: the late response can never write into the real session.
-  `rollbackPendingReauth()` and `logout()` therefore resolve only once the real storage is back in use.
-- An attempt with no activity for 5 minutes (`REAUTH_IDLE_TIMEOUT_MS`) rolls itself back.
-- It replaces `onExistingSession`: no sign-out, no revoke, no `AlreadySignedInException`. With no existing
-  session it is just a normal login.
-- It must be the signed-in user. The new tokens' Cognito username is compared with the live session's before
-  anything is written, and the real store is re-read at commit so a session changed by another tab meanwhile
-  (different user, or logged out) is not overwritten; either rolls back and throws
-  `ReauthUserMismatchException` (`isReauthUserMismatchError(err)`). A rolled-back attempt's callbacks and
-  `commit()` throw `ReauthAttemptEndedException` (`isReauthAttemptEndedError(err)`).
-- Do not call `Amplify.configure` yourself while an attempt can be active: it resets the token storage to the
-  real one. The library detects this and fails the attempt, but anything Amplify wrote in between has already
-  gone to the real storage (the live user's session is cleared if it no longer matches).
-- A plain `authenticate()` (without `allowWhileLoggedIn`) while an attempt is active throws.
-- Only one attempt at a time; a second throws. Call `rollbackPendingReauth()` when a login modal closes
-  mid-challenge or reaches a terminal failure. `logout()` and `forceSignOut()` do this for you.
-- While active, `getIdJwt()` / `getAccessJwt()` return the live session's tokens until they expire and never
-  refresh them; after commit they return the new ones. `refreshSession()` throws. The snapshot is not
-  invalidated by a logout in another tab (bounded by token expiry and the idle timeout).
-- With Cognito device tracking enabled, each re-auth looks like a new device (the private store has no device
-  keys). Wheels does not use it.
-- Amplify's Hub `signedIn` event fires before the commit, so a listener of your own sees it before the real
-  storage has the new tokens.
-- Known narrow race: a refresh of the real session that another part of the app starts at the same instant the
-  attempt begins writes its result into the private store. Don't kick off re-auth in the middle of a token
-  refresh storm.
-- `auth_time` (which a backend may use to judge freshness) is set at authentication. A fresh sign-in like this
-  one resets it; a token refresh does not (measured against a Cognito pool: `iat` and `exp` move, `auth_time` stays).
-- `clientMetadata` is client-controlled. Your Cognito triggers must never relax a factor check or derive claims
-  from it.
+- Always the signed-in user: the username is taken from the session, not the caller.
+- A fresh sign-in resets `auth_time`; `refreshSession()` does not (`iat`/`exp` move, `auth_time` stays).
+- The previous refresh token is not revoked, it just stops being used.
+- Amplify's Hub `signedIn` event fires.
+- Do not call `Amplify.configure` yourself with `Auth` config: it replaces the token provider this relies on, and
+  `reauthenticate` then throws `UserAlreadyAuthenticatedException`.
 
 **`clientMetadata`.** Cognito does not carry `ClientMetadata` between calls, so it is re-sent on every
 `confirmSignIn` of the exchange. Overrides: `completeNewPasswordChallenge(pw, attrs, metadata)` and
-`sendCustomChallengeAnswer(answer, metadata)`.
+`sendCustomChallengeAnswer(answer, metadata)`. It is client-controlled: Cognito triggers must never relax a factor
+check or derive claims from it.
 
 **Claims.** The signed-in state exposes `emailVerified`, `mfaEnrolled` and `mfaRequired`, parsed from the ID
 token (`'true'`/`true` and `'false'`/`false`). They are UI hints only: a backend failure can yield

@@ -17,11 +17,3 @@ export {
   ALREADY_SIGNED_IN_EXCEPTION,
   isAlreadySignedInError,
 } from './sessionGuards';
-export {
-  REAUTH_ATTEMPT_ENDED_EXCEPTION,
-  REAUTH_USER_MISMATCH_EXCEPTION,
-  clearPersistedSignInState,
-  isReauthAttemptEndedError,
-  isReauthUserMismatchError,
-  rollbackPendingReauth,
-} from './reauthGuard';

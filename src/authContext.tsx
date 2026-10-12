@@ -10,7 +10,6 @@ import {
   type FC,
   type PropsWithChildren,
 } from 'react';
-import { Amplify } from 'aws-amplify';
 import { Hub } from 'aws-amplify/utils';
 import {
   confirmResetPassword as amplifyConfirmResetPassword,
@@ -25,22 +24,11 @@ import {
   updateUserAttributes,
   verifyTOTPSetup,
 } from 'aws-amplify/auth';
-import { authenticateWith } from './authenticate';
+import { authenticateWith, reauthenticateWith } from './authenticate';
 import { claimsFromSession } from './claims';
 import { createMapSignInResult } from './mapSignInResult';
-import {
-  getGuardedJwt,
-  hasActiveReauth,
-  onReauthSettled,
-  reapplyReauthStorage,
-  rollbackPendingReauth,
-} from './reauthGuard';
-import {
-  checkSessionAfterReauth,
-  checkSessionOnMount,
-  refreshAndReload,
-  shouldLogOutOnHubEvent,
-} from './sessionGuards';
+import { configureAmplify } from './reauth';
+import { checkSessionOnMount, isRefreshTokenRejected } from './sessionGuards';
 import type {
   AuthenticateOptions,
   AuthState,
@@ -61,11 +49,9 @@ function shallowEqual(a: object, b: object): boolean {
 
 // Calls Amplify signOut() (revokes the refresh token where applicable, then
 // clears local tokens) regardless of app state - safe to call even when not
-// logged in. Does not update AuthProvider state. A pending re-auth attempt is
-// rolled back first: signing out must never run against its private store.
+// logged in. Does not update AuthProvider state.
 export async function forceSignOut(): Promise<void> {
   try {
-    await rollbackPendingReauth();
     await signOut();
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -152,62 +138,27 @@ export function createCognitoAuth<User extends object>(
     useEffect(() => {
       const version = ++versionRef.current;
 
-      Amplify.configure({
-        Auth: {
-          Cognito: {
-            userPoolId: userPool.userPoolId,
-            userPoolClientId: userPool.userPoolClientId,
-          },
-        },
+      configureAmplify({
+        userPoolId: userPool.userPoolId,
+        userPoolClientId: userPool.userPoolClientId,
       });
-      // Configure resets the token provider's storage to localStorage; put a
-      // pending re-auth attempt's private store back.
-      reapplyReauthStorage();
 
       // Never signOut on failure: a transient error at page load must not
       // revoke the refresh token. See checkSessionOnMount.
-      const runMountCheck = () =>
-        checkSessionOnMount({
-          fetchSession: fetchAuthSession,
-          loadUser: loadUserFromSession,
-          clearCurrentUser,
-          isStale: () => version !== versionRef.current,
-        });
-      // A remount / pool change mid re-auth would read the private store and
-      // log the app out: defer the check until the attempt settles.
-      let mountCheckDeferred = false;
-      if (hasActiveReauth()) {
-        mountCheckDeferred = true;
-      } else {
-        runMountCheck();
-      }
+      checkSessionOnMount({
+        fetchSession: fetchAuthSession,
+        loadUser: loadUserFromSession,
+        clearCurrentUser,
+        isStale: () => version !== versionRef.current,
+      });
 
       // Log the app out (state only, never signOut) when Amplify has cleared
       // the tokens after a failed refresh - otherwise isLoggedIn stays true while getIdJwt() is null.
       const stopListening = Hub.listen('auth', ({ payload }) => {
         if (version !== versionRef.current) return;
-        // Re-auth attempts are ignored here, re-checked on rollback below.
-        if (shouldLogOutOnHubEvent(payload, hasActiveReauth())) {
-          clearCurrentUser();
-        }
+        if (isRefreshTokenRejected(payload)) clearCurrentUser();
       });
-      const stopReauthListening = onReauthSettled((outcome) => {
-        if (mountCheckDeferred) {
-          mountCheckDeferred = false;
-          runMountCheck();
-          return;
-        }
-        if (outcome !== 'rollback') return;
-        void checkSessionAfterReauth({
-          fetchSession: fetchAuthSession,
-          clearCurrentUser,
-          isStale: () => version !== versionRef.current,
-        });
-      });
-      return () => {
-        stopListening();
-        stopReauthListening();
-      };
+      return stopListening;
     }, [
       userPool.userPoolId,
       userPool.userPoolClientId,
@@ -240,10 +191,6 @@ export function createCognitoAuth<User extends object>(
     );
 
     const getIdJwt = useCallback(async (): Promise<string | null> => {
-      // During a re-auth attempt fetchAuthSession would read the private
-      // store: serve the live session's snapshot instead.
-      const guarded = getGuardedJwt('idToken');
-      if (guarded !== undefined) return guarded;
       try {
         const session = await fetchAuthSession();
         return session.tokens?.idToken?.toString() ?? null;
@@ -253,8 +200,6 @@ export function createCognitoAuth<User extends object>(
     }, []);
 
     const getAccessJwt = useCallback(async (): Promise<string | null> => {
-      const guarded = getGuardedJwt('accessToken');
-      if (guarded !== undefined) return guarded;
       try {
         const session = await fetchAuthSession();
         return session.tokens?.accessToken?.toString() ?? null;
@@ -264,19 +209,30 @@ export function createCognitoAuth<User extends object>(
     }, []);
 
     const logout = useCallback(async (): Promise<void> => {
-      // Never signOut against a re-auth attempt's private store.
-      await rollbackPendingReauth();
       await signOut();
       clearCurrentUser();
     }, [clearCurrentUser]);
 
     const refreshSession = useCallback(async (): Promise<void> => {
-      await refreshAndReload({
-        reauthActive: hasActiveReauth(),
-        refresh: () => fetchAuthSession({ forceRefresh: true }),
-        reload: loadUserFromSession,
-      });
+      await fetchAuthSession({ forceRefresh: true });
+      await loadUserFromSession();
     }, [loadUserFromSession]);
+
+    const reauthenticate = useCallback(
+      async (pass: string, opts?: { clientMetadata?: Record<string, string> }) => {
+        // NOTE: the session's own username, so it can only ever be this user.
+        const username = currentUserRef.current?.authUser.username;
+        if (!username) throw new Error('Not logged in');
+        return reauthenticateWith({
+          username,
+          pass,
+          clientMetadata: opts?.clientMetadata,
+          authFlowType: userPool.authFlowType ?? 'USER_SRP_AUTH',
+          mapSignInResult,
+        });
+      },
+      [userPool.authFlowType, mapSignInResult],
+    );
 
     const changePassword = useCallback(
       async (oldPwd: string, newPwd: string): Promise<void> => {
@@ -352,6 +308,7 @@ export function createCognitoAuth<User extends object>(
         user: currentUser.user,
         ...claimsFromSession(currentUser.session),
         refreshSession,
+        reauthenticate,
         getAccessJwt,
         getIdJwt,
         logout,
@@ -372,6 +329,7 @@ export function createCognitoAuth<User extends object>(
       getAccessJwt,
       getIdJwt,
       refreshSession,
+      reauthenticate,
       logout,
       changePassword,
       updateEmail,

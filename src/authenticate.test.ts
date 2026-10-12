@@ -5,20 +5,18 @@ vi.mock('aws-amplify/auth', () => ({
   fetchAuthSession: vi.fn(),
 }));
 const h = vi.hoisted(() => ({
-  run: vi.fn(),
   clearTokens: vi.fn(),
-  active: vi.fn(() => false),
+  signInIgnoringSession: vi.fn(),
 }));
 vi.mock('aws-amplify/auth/cognito', () => ({
   cognitoUserPoolsTokenProvider: { tokenOrchestrator: { clearTokens: h.clearTokens } },
 }));
-vi.mock('./reauthGuard', () => ({
-  runWithReauthGuard: h.run,
-  hasActiveReauth: h.active,
+vi.mock('./reauth', () => ({
+  signInIgnoringSession: h.signInIgnoringSession,
 }));
 
 import { fetchAuthSession, signIn } from 'aws-amplify/auth';
-import { authenticateWith } from './authenticate';
+import { authenticateWith, reauthenticateWith } from './authenticate';
 
 const existing = () =>
   Object.assign(new Error('x'), { name: 'UserAlreadyAuthenticatedException' });
@@ -32,10 +30,7 @@ const base = () => ({
   forceSignOut: vi.fn().mockResolvedValue(undefined),
 });
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  h.active.mockReturnValue(false);
-});
+beforeEach(() => vi.clearAllMocks());
 
 describe('authenticateWith', () => {
   it('back-compat: no options calls signIn exactly as 3.1.0 did', async () => {
@@ -47,8 +42,8 @@ describe('authenticateWith', () => {
       password: 'pw',
       options: { authFlowType: 'USER_SRP_AUTH' },
     });
-    expect(deps.mapSignInResult).toHaveBeenCalledWith({ isSignedIn: true }, null, undefined);
-    expect(h.run).not.toHaveBeenCalled();
+    expect(deps.mapSignInResult).toHaveBeenCalledWith({ isSignedIn: true }, undefined);
+    expect(h.signInIgnoringSession).not.toHaveBeenCalled();
   });
 
   it("back-compat: default onExistingSession='replace' still signs out and retries", async () => {
@@ -86,49 +81,39 @@ describe('authenticateWith', () => {
     });
     expect(deps.mapSignInResult).toHaveBeenCalledWith(
       { isSignedIn: false },
-      null,
       clientMetadata,
     );
   });
+});
 
-  it('allowWhileLoggedIn bypasses onExistingSession entirely and runs under the guard', async () => {
-    const guard = { settled: false };
-    h.run.mockImplementation(async (run: () => Promise<unknown>) => ({
-      result: await run(),
-      guard,
-    }));
-    vi.mocked(signIn).mockResolvedValue({ isSignedIn: false } as never);
-    const deps = base();
-    const signal = new AbortController().signal;
+describe('reauthenticateWith', () => {
+  const deps = () => ({
+    username: 'cognito-user',
+    pass: 'pw',
+    authFlowType: 'CUSTOM_WITH_SRP' as const,
+    mapSignInResult: vi.fn().mockResolvedValue({ result: 'SUCCESS' }),
+  });
+
+  it('signs in as the given username, ignoring the session, & maps the result', async () => {
+    h.signInIgnoringSession.mockResolvedValue({ isSignedIn: false });
+    const d = deps();
     const clientMetadata = { mfaAction: 'setup' };
-    await authenticateWith({
-      ...deps,
-      opts: { allowWhileLoggedIn: true, onExistingSession: 'replace', clientMetadata, signal },
+    await reauthenticateWith({ ...d, clientMetadata });
+    expect(h.signInIgnoringSession).toHaveBeenCalledWith({
+      username: 'cognito-user',
+      password: 'pw',
+      options: { authFlowType: 'CUSTOM_WITH_SRP', clientMetadata },
     });
-    expect(h.run).toHaveBeenCalledWith(expect.any(Function), { signal });
-    expect(deps.forceSignOut).not.toHaveBeenCalled();
-    expect(fetchAuthSession).not.toHaveBeenCalled();
-    expect(h.clearTokens).not.toHaveBeenCalled();
-    expect(deps.mapSignInResult).toHaveBeenCalledWith({ isSignedIn: false }, guard, clientMetadata);
-  });
-
-  it('allowWhileLoggedIn: UserAlreadyAuthenticatedException is not special-cased (guard owns the store)', async () => {
-    h.run.mockImplementation(async (run: () => Promise<unknown>) => ({
-      result: await run(),
-      guard: null,
-    }));
-    vi.mocked(signIn).mockRejectedValue(existing());
-    const deps = base();
-    await expect(
-      authenticateWith({ ...deps, opts: { allowWhileLoggedIn: true } }),
-    ).rejects.toMatchObject({ name: 'UserAlreadyAuthenticatedException' });
-    expect(deps.forceSignOut).not.toHaveBeenCalled();
-  });
-
-  it('a plain authenticate while a re-auth attempt is active is refused, signing in nothing', async () => {
-    h.active.mockReturnValue(true);
-    const deps = base();
-    await expect(authenticateWith(deps)).rejects.toThrow('re-auth attempt is in progress');
     expect(signIn).not.toHaveBeenCalled();
+    expect(d.mapSignInResult).toHaveBeenCalledWith({ isSignedIn: false }, clientMetadata);
+  });
+
+  it('a failed attempt rethrows without mapping, signing out or clearing tokens', async () => {
+    const boom = Object.assign(new Error('x'), { name: 'NotAuthorizedException' });
+    h.signInIgnoringSession.mockRejectedValue(boom);
+    const d = deps();
+    await expect(reauthenticateWith(d)).rejects.toBe(boom);
+    expect(d.mapSignInResult).not.toHaveBeenCalled();
+    expect(h.clearTokens).not.toHaveBeenCalled();
   });
 });
