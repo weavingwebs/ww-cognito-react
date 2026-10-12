@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Amplify } from 'aws-amplify';
 import { confirmSignIn, fetchAuthSession, signIn } from 'aws-amplify/auth';
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito';
-import { configureAmplify, signInIgnoringSession } from './reauth';
+import { signInIgnoringSession } from './reauth';
 
 // NOTE: runs real Amplify against a faked Cognito endpoint, to pin the
 // internals signInIgnoringSession relies on. Expect to revisit on an Amplify
@@ -44,7 +45,9 @@ const wrongPassword = () => ({
 });
 
 beforeAll(() => {
-  configureAmplify({ userPoolId: 'eu-west-2_test', userPoolClientId: 'client' });
+  Amplify.configure({
+    Auth: { Cognito: { userPoolId: 'eu-west-2_test', userPoolClientId: 'client' } },
+  });
   cognitoUserPoolsTokenProvider.setKeyValueStorage(storage);
   globalThis.fetch = (async (_url: unknown, init: { headers: Record<string, string> }) => {
     const target = new Headers(init.headers).get('x-amz-target') ?? '';
@@ -116,10 +119,11 @@ describe('signInIgnoringSession', () => {
     expect(await authTime()).toBe(1000);
   });
 
-  it('the session is only hidden for the call itself', async () => {
-    respond = wrongPassword;
+  it('the session is only hidden from the attempt, not from other callers', async () => {
+    respond = () => ({ status: 200, body: { AuthenticationResult: tokensFor(4000) } });
     const attempt = signInIgnoringSession(input);
     expect(await authTime()).toBe(1000);
-    await attempt.catch(() => undefined);
+    expect((await attempt).isSignedIn).toBe(true);
+    expect(await authTime()).toBe(4000);
   });
 });

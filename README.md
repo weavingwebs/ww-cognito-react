@@ -83,8 +83,6 @@ password, failed step or abandoned challenge needs no clean-up.
 - A fresh sign-in resets `auth_time`; `refreshSession()` does not (`iat`/`exp` move, `auth_time` stays).
 - The previous refresh token is not revoked, it just stops being used.
 - Amplify's Hub `signedIn` event fires.
-- Do not call `Amplify.configure` yourself with `Auth` config: it replaces the token provider this relies on, and
-  `reauthenticate` then throws `UserAlreadyAuthenticatedException`.
 
 **`clientMetadata`.** Cognito does not carry `ClientMetadata` between calls, so it is re-sent on every
 `confirmSignIn` of the exchange. Overrides: `completeNewPasswordChallenge(pw, attrs, metadata)` and

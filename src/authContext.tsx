@@ -10,6 +10,7 @@ import {
   type FC,
   type PropsWithChildren,
 } from 'react';
+import { Amplify } from 'aws-amplify';
 import { Hub } from 'aws-amplify/utils';
 import {
   confirmResetPassword as amplifyConfirmResetPassword,
@@ -27,7 +28,6 @@ import {
 import { authenticateWith, reauthenticateWith } from './authenticate';
 import { claimsFromSession } from './claims';
 import { createMapSignInResult } from './mapSignInResult';
-import { configureAmplify } from './reauth';
 import { checkSessionOnMount, isRefreshTokenRejected } from './sessionGuards';
 import type {
   AuthenticateOptions,
@@ -138,9 +138,13 @@ export function createCognitoAuth<User extends object>(
     useEffect(() => {
       const version = ++versionRef.current;
 
-      configureAmplify({
-        userPoolId: userPool.userPoolId,
-        userPoolClientId: userPool.userPoolClientId,
+      Amplify.configure({
+        Auth: {
+          Cognito: {
+            userPoolId: userPool.userPoolId,
+            userPoolClientId: userPool.userPoolClientId,
+          },
+        },
       });
 
       // Never signOut on failure: a transient error at page load must not

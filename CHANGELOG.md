@@ -4,8 +4,7 @@
 
 All additive. `authenticate(email, pass)` makes the same Amplify calls as in 3.1.0 and its existing option
 (`onExistingSession`) is unchanged, so s4a and hermes need no code changes. Things to be aware of:
-- Amplify is now configured with a thin wrapper around the default Cognito token provider (see `reauthenticate`).
-  Behaviour is identical unless an app calls `Amplify.configure` with `Auth` config itself.
+- Requires `aws-amplify` `^6.22.0` (was `^6.20.0`): `reauthenticate` uses its `createAmplifyContext`.
 - A per-call `clientMetadata` override passed to `sendCustomChallengeAnswer` / `completeNewPasswordChallenge` now
   carries on to the later steps of the exchange (in 3.1.0 later steps without the argument sent nothing). No
   current consumer passes one.
