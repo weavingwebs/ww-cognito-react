@@ -3,7 +3,13 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Amplify } from 'aws-amplify';
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito';
-import { discardStoredSession, restoreStoredSession } from './storedSession';
+import {
+  cleanUpReplacedSession,
+  discardStoredSession,
+  isSameLogin,
+  readStoredSession,
+  restoreStoredSession,
+} from './storedSession';
 
 const P = 'CognitoIdentityServiceProvider.client.';
 const b64 = (o: object) =>
@@ -19,13 +25,13 @@ const storage = {
 };
 const SUFFIXES = ['accessToken', 'idToken', 'refreshToken', 'signInDetails', 'clockDrift', 'oauthMetadata'];
 const KEPT = ['deviceKey', 'deviceGroupKey', 'randomPasswordKey'];
-const seed = (user: string, { revocable = true } = {}) => {
+const seed = (user: string, { revocable = true, email = `${user}@x.co` } = {}) => {
   const claims = { sub: user, username: user, exp: exp(), iat: 1, ...(revocable ? { origin_jti: 'j' } : {}) };
   for (const s of SUFFIXES) data.set(`${P}${user}.${s}`, `${s}-${user}`);
   data.set(`${P}${user}.clockDrift`, '0');
   data.set(`${P}${user}.signInDetails`, '{}');
   data.set(`${P}${user}.accessToken`, jwt(claims));
-  data.set(`${P}${user}.idToken`, jwt({ ...claims, 'cognito:username': user }));
+  data.set(`${P}${user}.idToken`, jwt({ ...claims, 'cognito:username': user, email }));
   data.set(`${P}${user}.refreshToken`, `refresh-${user}`);
   for (const s of KEPT) data.set(`${P}${user}.${s}`, `${s}-${user}`);
 };
@@ -142,5 +148,73 @@ describe('restoreStoredSession', () => {
   it('does nothing for a user with no stored refresh token', async () => {
     expect(await restoreStoredSession('ghost')).toBe(false);
     expect(data.has(`${P}LastAuthUser`)).toBe(false);
+  });
+});
+
+describe('readStoredSession / isSameLogin', () => {
+  it('reads the current user, their email claim and whether the token is revocable', async () => {
+    seed('user-a', { email: 'a@example.com' });
+    data.set(`${P}LastAuthUser`, 'user-a');
+    expect(await readStoredSession()).toEqual({
+      username: 'user-a',
+      email: 'a@example.com',
+      refreshToken: 'refresh-user-a',
+      revocable: true,
+    });
+  });
+
+  it('is null with no current user or no refresh token', async () => {
+    expect(await readStoredSession()).toBeNull();
+    seed('user-a');
+    expect(await readStoredSession()).toBeNull();
+    data.set(`${P}LastAuthUser`, 'user-a');
+    data.delete(`${P}user-a.refreshToken`);
+    expect(await readStoredSession()).toBeNull();
+  });
+
+  it('matches the typed login on username or email, case-insensitively, trimmed', () => {
+    const stored = { username: 'Uuid-1', email: 'A@Example.com', refreshToken: 'r', revocable: true };
+    expect(isSameLogin(stored, ' a@example.COM ')).toBe(true);
+    expect(isSameLogin(stored, 'uuid-1')).toBe(true);
+    expect(isSameLogin(stored, 'b@example.com')).toBe(false);
+  });
+});
+
+describe('cleanUpReplacedSession', () => {
+  const previous = { username: 'user-a', email: 'a@x.co', refreshToken: 'refresh-user-a', revocable: true };
+
+  it('a different user is now current: discards the previous user by name, keeps the new one', async () => {
+    seed('user-a');
+    seed('user-b');
+    data.set(`${P}LastAuthUser`, 'user-b');
+    await cleanUpReplacedSession(previous);
+    expect(data.has(`${P}user-a.refreshToken`)).toBe(false);
+    expect(data.get(`${P}LastAuthUser`)).toBe('user-b');
+    expect(data.has(`${P}user-b.refreshToken`)).toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).Token).toBe('refresh-user-a');
+  });
+
+  it('the same user is current with a new refresh token: revokes only the old token', async () => {
+    seed('user-a');
+    data.set(`${P}LastAuthUser`, 'user-a');
+    data.set(`${P}user-a.refreshToken`, 'refresh-new');
+    await cleanUpReplacedSession(previous);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).Token).toBe('refresh-user-a');
+    expect(data.get(`${P}user-a.refreshToken`)).toBe('refresh-new');
+  });
+
+  it('the same user with an unchanged refresh token: does nothing', async () => {
+    seed('user-a');
+    data.set(`${P}LastAuthUser`, 'user-a');
+    await cleanUpReplacedSession(previous);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(data.has(`${P}user-a.refreshToken`)).toBe(true);
+  });
+
+  it('no one is current (the new session was not stored): leaves the previous session alone', async () => {
+    seed('user-a');
+    await cleanUpReplacedSession(previous);
+    expect(data.has(`${P}user-a.refreshToken`)).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

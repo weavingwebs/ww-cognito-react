@@ -1,4 +1,4 @@
-import type { OnExistingSession } from './sessionGuards';
+import type { ConfirmReplace, OnExistingSession } from './sessionGuards';
 import type { AuthUser, FetchUserAttributesOutput } from 'aws-amplify/auth';
 
 export type UserPoolConfig = {
@@ -43,6 +43,17 @@ export type SendCustomChallengeAnswerFn = (
 export type AuthenticateOptions = {
   /** What to do if a session already exists. */
   onExistingSession?: OnExistingSession;
+  /**
+   * With `onExistingSession: 'replace'` (the default), called before the
+   * sign-in when the browser holds a session for a DIFFERENT user (e.g. a stale
+   * login form in a second tab), so the app can warn that continuing replaces
+   * it. Resolve `false` to cancel: `authenticate` then throws
+   * `ReplaceCancelledException` (`isReplaceCancelledError`) and nothing is
+   * touched. Without it the session is replaced silently. Not called for the
+   * same user, for `'reject'`, or when there is no session. It runs before the
+   * password is checked.
+   */
+  confirmReplace?: ConfirmReplace;
   /**
    * Sent with the sign-in and re-sent on every step of the exchange (Cognito
    * does not carry it between calls), e.g. `{ mfaAction: 'setup' }`.

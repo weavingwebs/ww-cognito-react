@@ -20,34 +20,49 @@ import {
 const existing = () =>
   Object.assign(new Error('x'), { name: 'UserAlreadyAuthenticatedException' });
 
-const forceSignOut = vi.fn();
+const doSignInIgnoringSession = vi.fn();
+const onReplaced = vi.fn();
+const run = (
+  doSignIn: unknown,
+  onExistingSession?: 'replace' | 'reject',
+  adoptSession?: () => Promise<unknown>,
+) =>
+  signInHandlingExistingSession({
+    login: 'a@b.c',
+    doSignIn: doSignIn as never,
+    doSignInIgnoringSession: doSignInIgnoringSession as never,
+    onExistingSession,
+    adoptSession,
+    onReplaced,
+  });
 beforeEach(() => vi.clearAllMocks());
 
 describe('signInHandlingExistingSession', () => {
-  it('default: signs out and retries once', async () => {
-    const doSignIn = vi
-      .fn()
-      .mockRejectedValueOnce(existing())
-      .mockResolvedValueOnce({ isSignedIn: true });
-    await signInHandlingExistingSession(doSignIn as never, forceSignOut);
-    expect(forceSignOut).toHaveBeenCalledOnce();
-    expect(doSignIn).toHaveBeenCalledTimes(2);
+  it("default 'replace': signs in again ignoring the session, no sign-out, no token clearing", async () => {
+    const doSignIn = vi.fn().mockRejectedValue(existing());
+    doSignInIgnoringSession.mockResolvedValue({ isSignedIn: true });
+    await run(doSignIn);
+    expect(doSignIn).toHaveBeenCalledOnce();
+    expect(doSignInIgnoringSession).toHaveBeenCalledOnce();
+    expect(clearTokens).not.toHaveBeenCalled();
+  });
+
+  it("'replace': a wrong password leaves the existing session alone (nothing is cleared or revoked)", async () => {
+    const bad = Object.assign(new Error('pw'), { name: 'NotAuthorizedException' });
+    doSignInIgnoringSession.mockRejectedValue(bad);
+    await expect(run(vi.fn().mockRejectedValue(existing()))).rejects.toBe(bad);
+    expect(clearTokens).not.toHaveBeenCalled();
+    expect(onReplaced).not.toHaveBeenCalled();
   });
 
   it("'reject' with a valid session adopts it and throws AlreadySignedInException, no signOut", async () => {
     vi.mocked(fetchAuthSession).mockResolvedValue({ tokens: {} } as never);
     const adopt = vi.fn().mockResolvedValue(undefined);
     const doSignIn = vi.fn().mockRejectedValue(existing());
-    const err = await signInHandlingExistingSession(
-      doSignIn as never,
-      forceSignOut,
-      'reject',
-      adopt,
-    ).catch((e) => e);
+    const err = await run(doSignIn, 'reject', adopt).catch((e) => e);
     expect(isAlreadySignedInError(err)).toBe(true);
     expect(err.name).toBe('AlreadySignedInException');
     expect(adopt).toHaveBeenCalledOnce();
-    expect(forceSignOut).not.toHaveBeenCalled();
     expect(clearTokens).not.toHaveBeenCalled();
     expect(doSignIn).toHaveBeenCalledOnce();
   });
@@ -56,9 +71,7 @@ describe('signInHandlingExistingSession', () => {
     vi.mocked(fetchAuthSession).mockResolvedValue({ tokens: {} } as never);
     const adopt = vi.fn().mockRejectedValue(Object.assign(new Error('n'), { name: 'NetworkError' }));
     const doSignIn = vi.fn().mockRejectedValue(existing());
-    const err = await signInHandlingExistingSession(
-      doSignIn as never, forceSignOut, 'reject', adopt,
-    ).catch((e) => e);
+    const err = await run(doSignIn, 'reject', adopt).catch((e) => e);
     expect(isAlreadySignedInError(err)).toBe(true);
     expect(clearTokens).not.toHaveBeenCalled();
     expect(doSignIn).toHaveBeenCalledOnce();
@@ -73,11 +86,8 @@ describe('signInHandlingExistingSession', () => {
       .fn()
       .mockRejectedValueOnce(existing())
       .mockResolvedValueOnce({ isSignedIn: true });
-    await signInHandlingExistingSession(
-      doSignIn as never, forceSignOut, 'reject', adopt,
-    );
+    await run(doSignIn, 'reject', adopt);
     expect(clearTokens).toHaveBeenCalledOnce();
-    expect(forceSignOut).not.toHaveBeenCalled();
     expect(doSignIn).toHaveBeenCalledTimes(2);
   });
 
@@ -87,9 +97,8 @@ describe('signInHandlingExistingSession', () => {
       .fn()
       .mockRejectedValueOnce(existing())
       .mockResolvedValueOnce({ isSignedIn: true });
-    await signInHandlingExistingSession(doSignIn as never, forceSignOut, 'reject');
+    await run(doSignIn, 'reject');
     expect(clearTokens).toHaveBeenCalledOnce();
-    expect(forceSignOut).not.toHaveBeenCalled();
     expect(doSignIn).toHaveBeenCalledTimes(2);
   });
 
@@ -98,10 +107,9 @@ describe('signInHandlingExistingSession', () => {
     vi.mocked(fetchAuthSession).mockRejectedValue(boom);
     const doSignIn = vi.fn().mockRejectedValue(existing());
     await expect(
-      signInHandlingExistingSession(doSignIn as never, forceSignOut, 'reject'),
+      run(doSignIn, 'reject'),
     ).rejects.toBe(boom);
     expect(clearTokens).not.toHaveBeenCalled();
-    expect(forceSignOut).not.toHaveBeenCalled();
     expect(doSignIn).toHaveBeenCalledOnce();
   });
 
@@ -109,9 +117,8 @@ describe('signInHandlingExistingSession', () => {
     const bad = Object.assign(new Error('nope'), { name: 'NotAuthorizedException' });
     const doSignIn = vi.fn().mockRejectedValue(bad);
     await expect(
-      signInHandlingExistingSession(doSignIn as never, forceSignOut, 'reject'),
+      run(doSignIn, 'reject'),
     ).rejects.toBe(bad);
-    expect(forceSignOut).not.toHaveBeenCalled();
     expect(clearTokens).not.toHaveBeenCalled();
   });
 });

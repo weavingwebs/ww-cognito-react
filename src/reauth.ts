@@ -113,7 +113,11 @@ export type ReauthGuard = {
 // steps are guarded: by the time Amplify reports success it has already stored
 // the tokens and fired Hub `signedIn`, so refusing to load the user would leave
 // the tab logged out over a valid stored session (e.g. a double-submitted login).
-export function createSupersessionGuard(): ReauthGuard {
+// `onSuccess` runs once, when Amplify reports success (the new tokens are
+// stored by then); it must not throw.
+export function createSupersessionGuard(
+  onSuccess?: () => Promise<void>,
+): ReauthGuard {
   const attempt = supersedeReauthAttempts();
   return {
     beforeStep: async () => {
@@ -124,7 +128,9 @@ export function createSupersessionGuard(): ReauthGuard {
         );
       }
     },
-    beforeSuccess: async () => {},
+    beforeSuccess: async () => {
+      await onSuccess?.();
+    },
   };
 }
 

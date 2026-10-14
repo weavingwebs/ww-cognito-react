@@ -88,6 +88,21 @@ async function revokeRefreshToken(refreshToken: string): Promise<void> {
   }
 }
 
+// Starts the revoke and reports the outcome; never rejects, never logs the token.
+function revokeInBackground(refreshToken: string): Promise<boolean> {
+  return revokeRefreshToken(refreshToken).then(
+    () => true,
+    (err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error(
+        'Could not revoke the discarded session:',
+        err instanceof Error ? err.message : 'unknown error',
+      );
+      return false;
+    },
+  );
+}
+
 export type DiscardResult = {
   // Settles when the revoke has finished; never rejects. false if there was
   // nothing to revoke or the revoke failed (the refresh token then stays valid
@@ -146,19 +161,7 @@ export async function discardStoredSession(
     }
   }
   if (!refreshToken || !revocable) return none;
-  return {
-    revoked: revokeRefreshToken(refreshToken).then(
-      () => true,
-      (err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.error(
-          'Could not revoke the discarded session:',
-          err instanceof Error ? err.message : 'unknown error',
-        );
-        return false;
-      },
-    ),
-  };
+  return { revoked: revokeInBackground(refreshToken) };
 }
 
 // Makes `username` the current user again, but only if no one is current and
@@ -175,5 +178,83 @@ export async function restoreStoredSession(username: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+// What a login that is about to replace the stored session needs to know.
+export type StoredSession = {
+  // The Cognito username the tokens are stored under (may be a UUID).
+  username: string;
+  // The email claim of the stored ID token, for display and matching only (the
+  // signature is not checked and nothing is trusted on it).
+  email: string | undefined;
+  refreshToken: string;
+  // Whether the access token carries origin_jti (see discardStoredSession).
+  revocable: boolean;
+};
+
+// The session Amplify last stored, if it still has a refresh token. Never
+// throws.
+export async function readStoredSession(): Promise<StoredSession | null> {
+  try {
+    const prefix = keyPrefix();
+    if (!prefix) return null;
+    const kv = storage();
+    const username = await kv.getItem(`${prefix}LastAuthUser`);
+    if (!username) return null;
+    const refreshToken = await kv.getItem(`${prefix}${username}.refreshToken`);
+    if (!refreshToken) return null;
+    const email = decodePayload(
+      await kv.getItem(`${prefix}${username}.idToken`),
+    )?.email;
+    return {
+      username,
+      email: typeof email === 'string' ? email : undefined,
+      refreshToken,
+      revocable:
+        decodePayload(await kv.getItem(`${prefix}${username}.accessToken`))
+          ?.origin_jti !== undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Whether `login` (as typed) is the stored session's user.
+export function isSameLogin(stored: StoredSession, login: string): boolean {
+  const typed = login.trim().toLowerCase();
+  return (
+    typed === stored.username.toLowerCase() ||
+    (stored.email !== undefined && typed === stored.email.toLowerCase())
+  );
+}
+
+// After a login has stored its new tokens over `previous`: clean up the
+// session it replaced. Decided from what is stored NOW, never from the typed
+// login (an alias such as a phone number or preferred_username would fool it):
+//  - a different user is current: discard the previous user by name;
+//  - the same user is current: the old refresh token was overwritten rather
+//    than revoked, so revoke it if it differs;
+//  - no one is current (or storage cannot be read): the new session was not
+//    stored as expected, so leave everything alone.
+export async function cleanUpReplacedSession(
+  previous: StoredSession,
+): Promise<void> {
+  try {
+    const prefix = keyPrefix();
+    if (!prefix) return;
+    const kv = storage();
+    const current = await kv.getItem(`${prefix}LastAuthUser`);
+    if (!current) return;
+    if (current !== previous.username) {
+      await discardStoredSession(previous.username);
+      return;
+    }
+    const now = await kv.getItem(`${prefix}${current}.refreshToken`);
+    if (now && now !== previous.refreshToken && previous.revocable) {
+      void revokeInBackground(previous.refreshToken);
+    }
+  } catch {
+    // Best-effort.
   }
 }

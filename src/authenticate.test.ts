@@ -9,6 +9,13 @@ const h = vi.hoisted(() => ({
   signInIgnoringSession: vi.fn(),
   createReauthGuard: vi.fn(),
   createSupersessionGuard: vi.fn(),
+  readStoredSession: vi.fn(),
+  cleanUpReplacedSession: vi.fn(),
+}));
+vi.mock('./storedSession', async (orig) => ({
+  ...(await orig<typeof import('./storedSession')>()),
+  readStoredSession: h.readStoredSession,
+  cleanUpReplacedSession: h.cleanUpReplacedSession,
 }));
 vi.mock('aws-amplify/auth/cognito', () => ({
   cognitoUserPoolsTokenProvider: { tokenOrchestrator: { clearTokens: h.clearTokens } },
@@ -39,13 +46,20 @@ const base = () => ({
   authFlowType: 'USER_SRP_AUTH' as const,
   mapSignInResult: vi.fn().mockResolvedValue({ result: 'SUCCESS' }),
   loadUserFromSession: vi.fn().mockResolvedValue(undefined),
-  forceSignOut: vi.fn().mockResolvedValue(undefined),
 });
 
 beforeEach(() => {
   vi.clearAllMocks();
   h.createSupersessionGuard.mockReturnValue(undefined);
+  h.readStoredSession.mockResolvedValue(null);
 });
+
+const stored = {
+  username: 'old-uuid',
+  email: 'old@b.c',
+  refreshToken: 'r-old',
+  revocable: true,
+};
 
 describe('authenticateWith', () => {
   it('back-compat: no options calls signIn exactly as 3.1.0 did', async () => {
@@ -79,14 +93,91 @@ describe('authenticateWith', () => {
     );
   });
 
-  it("back-compat: default onExistingSession='replace' still signs out and retries", async () => {
-    vi.mocked(signIn)
-      .mockRejectedValueOnce(existing())
-      .mockResolvedValueOnce({ isSignedIn: true } as never);
+  it("default 'replace': signs in again WITHOUT signing out first, keeping the existing session until success", async () => {
+    vi.mocked(signIn).mockRejectedValueOnce(existing());
+    h.signInIgnoringSession.mockResolvedValue({ isSignedIn: true } as never);
     const deps = base();
     await authenticateWith(deps);
-    expect(deps.forceSignOut).toHaveBeenCalledOnce();
-    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(signIn).toHaveBeenCalledOnce();
+    expect(h.signInIgnoringSession).toHaveBeenCalledWith({
+      username: 'a@b.c',
+      password: 'pw',
+      options: { authFlowType: 'USER_SRP_AUTH' },
+    });
+  });
+
+  it("'replace' with a stored session: cleans it up only when the guard reports success", async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    let onSuccess: (() => Promise<void>) | undefined;
+    h.createSupersessionGuard.mockImplementation((fn) => {
+      onSuccess = fn;
+      return undefined;
+    });
+    vi.mocked(signIn).mockRejectedValueOnce(existing());
+    h.signInIgnoringSession.mockResolvedValue({ isSignedIn: false } as never);
+    await authenticateWith(base());
+    expect(h.cleanUpReplacedSession).not.toHaveBeenCalled();
+    await onSuccess!();
+    expect(h.cleanUpReplacedSession).toHaveBeenCalledWith(stored);
+    await onSuccess!(); // once only
+    expect(h.cleanUpReplacedSession).toHaveBeenCalledOnce();
+  });
+
+  it('a plain login with no existing session never reads storage or cleans up', async () => {
+    let onSuccess: (() => Promise<void>) | undefined;
+    h.createSupersessionGuard.mockImplementation((fn) => {
+      onSuccess = fn;
+      return undefined;
+    });
+    vi.mocked(signIn).mockResolvedValue({ isSignedIn: true } as never);
+    await authenticateWith(base());
+    await onSuccess!();
+    expect(h.readStoredSession).not.toHaveBeenCalled();
+    expect(h.cleanUpReplacedSession).not.toHaveBeenCalled();
+  });
+
+  it('confirmReplace declined: throws ReplaceCancelledException, nothing signed in or cleaned', async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    vi.mocked(signIn).mockRejectedValueOnce(existing());
+    const confirmReplace = vi.fn().mockResolvedValue(false);
+    const err = await authenticateWith({ ...base(), opts: { confirmReplace } }).catch((e) => e);
+    expect(err.name).toBe('ReplaceCancelledException');
+    expect(confirmReplace).toHaveBeenCalledWith({ username: 'old-uuid', email: 'old@b.c' });
+    expect(h.signInIgnoringSession).not.toHaveBeenCalled();
+    expect(h.cleanUpReplacedSession).not.toHaveBeenCalled();
+  });
+
+  it('confirmReplace accepted: proceeds', async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    vi.mocked(signIn).mockRejectedValueOnce(existing());
+    h.signInIgnoringSession.mockResolvedValue({ isSignedIn: true } as never);
+    await authenticateWith({ ...base(), opts: { confirmReplace: async () => true } });
+    expect(h.signInIgnoringSession).toHaveBeenCalledOnce();
+  });
+
+  it.each(['old@b.c', ' OLD@B.C ', 'old-uuid'])(
+    'confirmReplace is not asked when the typed login (%s) is the stored user',
+    async (typed) => {
+      h.readStoredSession.mockResolvedValue(stored);
+      vi.mocked(signIn).mockRejectedValueOnce(existing());
+      h.signInIgnoringSession.mockResolvedValue({ isSignedIn: true } as never);
+      const confirmReplace = vi.fn();
+      await authenticateWith({ ...base(), email: typed, opts: { confirmReplace } });
+      expect(confirmReplace).not.toHaveBeenCalled();
+    },
+  );
+
+  it("confirmReplace is ignored for 'reject' and when there is no existing session", async () => {
+    const confirmReplace = vi.fn();
+    vi.mocked(signIn).mockResolvedValue({ isSignedIn: true } as never);
+    await authenticateWith({ ...base(), opts: { confirmReplace } });
+    vi.mocked(signIn).mockRejectedValue(existing());
+    vi.mocked(fetchAuthSession).mockResolvedValue({ tokens: {} } as never);
+    await authenticateWith({
+      ...base(),
+      opts: { confirmReplace, onExistingSession: 'reject' },
+    }).catch(() => undefined);
+    expect(confirmReplace).not.toHaveBeenCalled();
   });
 
   it("back-compat: onExistingSession='reject' still adopts then throws AlreadySignedInException", async () => {
@@ -99,7 +190,6 @@ describe('authenticateWith', () => {
     }).catch((e) => e);
     expect(err.name).toBe('AlreadySignedInException');
     expect(deps.loadUserFromSession).toHaveBeenCalledOnce();
-    expect(deps.forceSignOut).not.toHaveBeenCalled();
   });
 
   it('forwards clientMetadata on signIn and to the exchange', async () => {

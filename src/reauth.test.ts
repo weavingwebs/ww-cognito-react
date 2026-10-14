@@ -1,9 +1,11 @@
 // @vitest-environment node
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Amplify } from 'aws-amplify';
 import { confirmSignIn, fetchAuthSession, signIn } from 'aws-amplify/auth';
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito';
 import { signInIgnoringSession } from './reauth';
+import { signInHandlingExistingSession } from './sessionGuards';
+import { cleanUpReplacedSession, readStoredSession } from './storedSession';
 
 // NOTE: runs real Amplify against a faked Cognito endpoint, to pin the
 // internals signInIgnoringSession relies on. Expect to revisit on an Amplify
@@ -12,11 +14,12 @@ const b64 = (o: object) =>
   btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const jwt = (claims: object) => `${b64({ alg: 'none' })}.${b64(claims)}.sig`;
 const now = () => Math.floor(Date.now() / 1000);
+let who = 'auser';
 const tokensFor = (authTime: number) => {
-  const claims = { sub: 'auser', exp: now() + 3600, iat: now(), auth_time: authTime };
+  const claims = { sub: who, exp: now() + 3600, iat: now(), auth_time: authTime, origin_jti: `j-${authTime}` };
   return {
-    AccessToken: jwt({ ...claims, username: 'auser' }),
-    IdToken: jwt({ ...claims, 'cognito:username': 'auser' }),
+    AccessToken: jwt({ ...claims, username: who }),
+    IdToken: jwt({ ...claims, 'cognito:username': who, email: `${who}@x.co` }),
     RefreshToken: `refresh-${authTime}`,
   };
 };
@@ -56,7 +59,7 @@ const srp = (after: () => { status: number; body: object }) =>
               SALT: 'abcdef0123456789',
               SECRET_BLOCK: 'c2VjcmV0',
               SRP_B: '1234567890abcdef1234567890abcdef1234567890abcdef',
-              USER_ID_FOR_SRP: 'auser',
+              USER_ID_FOR_SRP: who,
             },
           },
         }
@@ -226,5 +229,57 @@ describe.each(flows)('signInIgnoringSession (%s)', (flow) => {
     expect(await authTime()).toBe(1000);
     expect((await attempt).isSignedIn).toBe(true);
     expect(await authTime()).toBe(4000);
+  });
+});
+
+describe("'replace' with a different user stored (real Amplify, fake Cognito)", () => {
+  const replaceAs = async (cleanUp: { fn?: () => Promise<void> }) => {
+    who = 'user-b';
+    const typed = { username: 'user-b', password: 'pw', options: { authFlowType: 'USER_SRP_AUTH' as Flow } };
+    return signInHandlingExistingSession({
+      login: 'user-b',
+      doSignIn: () => signIn(typed),
+      doSignInIgnoringSession: () => signInIgnoringSession(typed),
+      onReplaced: (fn) => void (cleanUp.fn = fn),
+    });
+  };
+  beforeEach(async () => {
+    who = 'auser';
+    input = { ...input, options: { authFlowType: 'USER_SRP_AUTH' } };
+    await seedSession();
+  });
+  afterAll(() => void (who = 'auser'));
+
+  it('a wrong password leaves the existing user signed in and unrevoked', async () => {
+    respond = srp(wrongPassword);
+    const cleanUp: { fn?: () => Promise<void> } = {};
+    await expect(replaceAs(cleanUp)).rejects.toMatchObject({ name: 'NotAuthorizedException' });
+    expect(calls).not.toContain('RevokeToken');
+    expect((await readStoredSession())?.username).toBe('auser');
+    expect(await authTime()).toBe(1000);
+  });
+
+  it('success makes the new user current; cleanup then discards (and revokes) the old one only', async () => {
+    const revoked: string[] = [];
+    const fetchBefore = globalThis.fetch;
+    respond = srp(signedIn(2000));
+    const cleanUp: { fn?: () => Promise<void> } = {};
+    await replaceAs(cleanUp);
+    expect((await readStoredSession())?.username).toBe('user-b');
+    expect(data.get('CognitoIdentityServiceProvider.client.auser.refreshToken')).toBe('refresh-1000');
+    globalThis.fetch = (async (_u: unknown, init: { body: string }) => {
+      revoked.push(JSON.parse(init.body).Token);
+      return new Response('{}', { status: 200 });
+    }) as never;
+    try {
+      await cleanUp.fn!();
+      await new Promise((r) => setTimeout(r, 0));
+    } finally {
+      globalThis.fetch = fetchBefore;
+    }
+    expect(data.has('CognitoIdentityServiceProvider.client.auser.refreshToken')).toBe(false);
+    expect(revoked).toEqual(['refresh-1000']);
+    expect((await readStoredSession())?.username).toBe('user-b');
+    expect((await fetchAuthSession()).tokens?.idToken?.payload['cognito:username']).toBe('user-b');
   });
 });

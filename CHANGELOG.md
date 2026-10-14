@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased (3.3.0)
+
+### Behaviour changes
+
+- **`authenticate` with `onExistingSession: 'replace'` (the default) no longer signs out first.** In 3.1/3.2 it
+  revoked the existing session *before* the password was checked, so a wrong password logged the old user out. It now
+  signs in again ignoring the stored session (the `signInIgnoringSession` mechanism `reauthenticate` uses; only after
+  Amplify has refused with `UserAlreadyAuthenticatedException`, so a normal login is unchanged) and cleans up the
+  replaced session only once Amplify reports success: a different user's keys are removed and their refresh token
+  revoked best-effort; for the same user the old refresh token is revoked if it differs. If nobody is stored as
+  current afterwards, nothing is touched. As `reauthenticate`, this depends on Amplify's read order; if that changes,
+  the sign-in can store the tokens and then fail with `AmplifyInternalsChangedException` (`reauth.test.ts` pins it).
+  `forceSignOut` is still exported but no longer used by `authenticate`.
+
+### Added
+
+- **`authenticate(..., { confirmReplace })`** (optional, default unchanged: silent replace). Called before the
+  sign-in when the stored session is a different login, with `{ username, email? }`; resolving `false` throws
+  `ReplaceCancelledException` (`isReplaceCancelledError`, `REPLACE_CANCELLED_EXCEPTION`, `ConfirmReplace` type) with
+  nothing touched. See the README.
+
 ## 3.2.0
 
 All additive. `authenticate(email, pass)` makes the same Amplify calls as in 3.1.0 and its existing option

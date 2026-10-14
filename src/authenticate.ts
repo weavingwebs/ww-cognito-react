@@ -46,25 +46,36 @@ export async function authenticateWith(deps: {
   authFlowType: AuthFlowType;
   mapSignInResult: MapSignInResult;
   loadUserFromSession: () => Promise<unknown>;
-  forceSignOut: () => Promise<void>;
 }): Promise<AuthenticateResult> {
   const { email, pass, opts, authFlowType, mapSignInResult } = deps;
   const clientMetadata = opts?.clientMetadata;
   // Amplify has one global sign-in state: this starts a new exchange, and ends
   // any older one.
-  const guard = createSupersessionGuard();
+  // Set when a 'replace' login finds a session to clean up; run by the guard
+  // once Amplify reports success.
+  let cleanUp: (() => Promise<void>) | undefined;
+  const guard = createSupersessionGuard(async () => {
+    const run = cleanUp;
+    cleanUp = undefined;
+    await run?.();
+  });
 
   // Amplify refuses to sign in if it thinks a session is already active, even
   // if our app state disagrees (e.g. a stale local session). See
   // signInHandlingExistingSession.
-  const onExistingSession: OnExistingSession | undefined =
-    opts?.onExistingSession;
-  const result = await signInHandlingExistingSession(
-    () => signIn(signInInput(email.trim(), pass, authFlowType, clientMetadata)),
-    deps.forceSignOut,
-    onExistingSession,
-    deps.loadUserFromSession,
-  );
+  const login = email.trim();
+  const input = signInInput(login, pass, authFlowType, clientMetadata);
+  const result = await signInHandlingExistingSession({
+    login,
+    doSignIn: () => signIn(input),
+    doSignInIgnoringSession: () => signInIgnoringSession(input),
+    onExistingSession: opts?.onExistingSession,
+    adoptSession: deps.loadUserFromSession,
+    confirmReplace: opts?.confirmReplace,
+    onReplaced: (fn) => {
+      cleanUp = fn;
+    },
+  });
   return mapSignInResult(result, clientMetadata, guard);
 }
 

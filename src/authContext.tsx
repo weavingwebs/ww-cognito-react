@@ -200,7 +200,6 @@ export function createCognitoAuth<User extends object>(
           authFlowType: userPool.authFlowType ?? 'USER_SRP_AUTH',
           mapSignInResult,
           loadUserFromSession,
-          forceSignOut,
         });
       },
       [userPool.authFlowType, mapSignInResult, loadUserFromSession],

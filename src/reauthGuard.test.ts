@@ -75,6 +75,16 @@ describe('createSupersessionGuard', () => {
     // Success is never refused: Amplify has already stored the tokens.
     await expect(plain.beforeSuccess()).resolves.toBeUndefined();
   });
+
+  it('runs onSuccess on success even when superseded (the tokens are stored either way)', async () => {
+    const onSuccess = vi.fn().mockResolvedValue(undefined);
+    const plain = createSupersessionGuard(onSuccess);
+    await plain.beforeStep();
+    expect(onSuccess).not.toHaveBeenCalled();
+    createReauthGuard(deps());
+    await plain.beforeSuccess();
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
 });
 
 describe('beforeSuccess', () => {

@@ -57,13 +57,34 @@ try {
 }
 ```
 
-`onExistingSession` defaults to `'replace'` (sign out, which revokes the refresh token, then retry). With
-`'reject'` an existing valid session is never signed out or revoked. `authenticate` throws
+`onExistingSession` defaults to `'replace'`: the new login replaces whatever session is stored. Since 3.3.0 it signs in
+again *without* signing out first, so a wrong password or an abandoned challenge leaves the existing session alone;
+only once Amplify reports success is the replaced session cleaned up (a different user's keys are removed and
+their refresh token revoked best-effort; for the same user the old refresh token is revoked). It uses the same
+Amplify-internals trick as `reauthenticate` (see below). With `'reject'` an existing valid session is never signed out or revoked. `authenticate` throws
 `AlreadySignedInException` and normally the session has been loaded into this tab (`isLoggedIn` becomes `true`);
 if loading it hit a transient error the exception is still thrown but `isLoggedIn` stays `false`, so redirect
 based on context state, not on the exception alone. The loaded session may belong to a different user than the
 email entered (the password is not checked), so check `user` if that matters. If the session check itself fails
 (e.g. offline) that original error is thrown instead.
+
+**`confirmReplace` (optional, 3.3.0).** With `'replace'`, a stale login form in a second tab can silently replace
+another user's session. Pass `confirmReplace` to warn first; without it nothing changes and the session is replaced
+silently:
+
+```ts
+await auth.authenticate(email, pass, {
+  confirmReplace: ({ username, email }) =>
+    showModal(`${email ?? username} is still signed in. Replace them?`), // boolean | Promise<boolean>
+});
+// resolving false throws ReplaceCancelledException (isReplaceCancelledError); nothing is touched.
+```
+
+It is called only when the stored session belongs to a *different* login (the typed email or username does not match
+the stored user's username or ID-token email), never for `'reject'`, the same user, or when there is no session. It
+runs before the password is checked, and the UI is yours. Leftovers that cannot be closed: a failed revoke (offline)
+leaves the old refresh token valid until it expires, and a tab closed between Amplify storing the new tokens and the
+cleanup leaves the old user's keys in storage.
 
 ## Re-authentication, `clientMetadata` and claims (3.2.0)
 

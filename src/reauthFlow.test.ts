@@ -154,7 +154,6 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
       authFlowType: 'USER_SRP_AUTH',
       mapSignInResult: createMapSignInResult(load),
       loadUserFromSession: load,
-      forceSignOut: vi.fn(),
     });
     if (old.result !== 'TOTP_REQUIRED') throw new Error('unreachable');
 
@@ -176,7 +175,6 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
       authFlowType: 'USER_SRP_AUTH',
       mapSignInResult: createMapSignInResult(load),
       loadUserFromSession: load,
-      forceSignOut: vi.fn(),
     });
     await expect(first.respondToTotpChallenge('1')).rejects.toSatisfy(isReauthAbortedError);
     expect(confirmSignIn).not.toHaveBeenCalled();
