@@ -34,9 +34,29 @@ All additive. `authenticate(email, pass)` makes the same Amplify calls as in 3.1
   `emailVerified: boolean | undefined`, `mfaEnrolled: boolean`, `mfaRequired: boolean`. `'true'`/`true` and
   `'false'`/`false` are parsed; anything else is `false` (`undefined` for `emailVerified`). UI hints only: never
   gate anything on them.
+- **`AmplifyInternalsChangedException`** (`isAmplifyInternalsChangedError`, `AMPLIFY_INTERNALS_CHANGED_EXCEPTION`):
+  `reauthenticate` throws it when Amplify's late "who is signed in" read fails after the sign-in and the hidden read
+  was the only read made, i.e. a newer Amplify no longer reads the session in the order `signInIgnoringSession`
+  relies on. The new tokens may be stored with the user not loaded, so reload the page. The session checks still run
+  first (a tab that logged out meanwhile has the session discarded). The same Amplify error from any other cause is
+  rethrown unchanged. Normally unreachable: `yarn test` pins the order for the supported Amplify version.
 - **`refreshSession()`** on the signed-in state: forces a token refresh then reloads the user and claims. A refresh
   is not a re-authentication: the ID token keeps its original `auth_time` (measured against a Cognito pool: `iat`/`exp`
   move, `auth_time` does not).
+
+### Fixed
+
+- `reauthenticate`: when the tab logged out (or changed user) while the final answer was in flight, the session the
+  attempt had just stored is now discarded by username (its keys removed, its refresh token revoked best-effort,
+  `LastAuthUser` removed only if it still names that user). It used to call `signOut()`, which revokes whichever user
+  is current and so could revoke a third user another tab had signed in afterwards. If that third user signed in
+  *before* the attempt's tokens were stored they are logged out as before (tokens left stored, not revoked). If the
+  attempt had taken `LastAuthUser` from the user the tab shows, that user is made current again when their tokens are
+  intact instead of the tab being reset. The revoke is not awaited, so the tab is never held up by the network.
+- `updateEmail(...).verifyEmail(code)` now forces a token refresh before reloading the user, so `emailVerified` and
+  the `email` claim are current straight away (before, they stayed stale until the next refresh). A transient refresh
+  failure is ignored (the address is already confirmed); a definitive one logs the tab out as usual and the call
+  rejects.
 
 ## 3.1.0
 

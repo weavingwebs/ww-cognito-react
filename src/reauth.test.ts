@@ -134,6 +134,25 @@ describe.each(flows)('signInIgnoringSession (%s)', (flow) => {
     expect(order[0]).toBe('hidden');
   });
 
+  it('when the new tokens are not persisted, Amplify\'s own error is rethrown unwrapped (read order intact)', async () => {
+    // A storage that drops the access token makes the read right after the
+    // store find no user: UnexpectedSignInInterruptionException from a REAL
+    // Amplify, with the read order as expected, so it must not be relabelled.
+    const setItem = storage.setItem;
+    storage.setItem = async (k: string, v: string) => {
+      if (k.endsWith('.accessToken')) data.delete(k);
+      else await setItem(k, v);
+    };
+    respond = srp(signedIn(2000));
+    try {
+      await expect(signInIgnoringSession(input)).rejects.toMatchObject({
+        name: 'UnexpectedSignInInterruptionException',
+      });
+    } finally {
+      storage.setItem = setItem;
+    }
+  });
+
   it('a wrong password rejects & leaves the live session intact', async () => {
     respond = srp(wrongPassword);
     await expect(signInIgnoringSession(input)).rejects.toMatchObject({

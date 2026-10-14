@@ -15,7 +15,8 @@ const deps = (over: Partial<ReauthGuardDeps> = {}): ReauthGuardDeps => ({
   tabUsername: () => 'auser',
   liveUsername: async () => 'auser',
   liveAuthTime: async () => 2000,
-  signOut: vi.fn().mockResolvedValue(undefined),
+  discardSession: vi.fn().mockResolvedValue(undefined),
+  restoreSession: vi.fn().mockResolvedValue(false),
   clearTabUser: vi.fn(),
   ...over,
 });
@@ -80,35 +81,80 @@ describe('beforeSuccess', () => {
   it('passes with a newer auth_time', async () => {
     const d = deps();
     await expect(createReauthGuard(d).beforeSuccess()).resolves.toBeUndefined();
-    expect(d.signOut).not.toHaveBeenCalled();
+    expect(d.discardSession).not.toHaveBeenCalled();
   });
 
-  it('discards the session when this tab logged out while the last answer was in flight', async () => {
+  it('discards (by name) the session when this tab logged out while the last answer was in flight', async () => {
     const d = deps({ tabUsername: () => undefined });
     await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
-    expect(d.signOut).toHaveBeenCalledOnce();
+    expect(d.discardSession).toHaveBeenCalledOnce();
+    expect(d.discardSession).toHaveBeenCalledWith('auser');
     expect(d.clearTabUser).not.toHaveBeenCalled();
   });
 
-  it('when the tab now shows ANOTHER user, signs out the clobbering session and resets the tab', async () => {
+  it('tab shows ANOTHER user whose session is gone: discards this attempt by name and resets the tab', async () => {
+    // liveUsername says A (just re-authed); B cannot be made current again.
     const d = deps({ tabUsername: () => 'user-b' });
     await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
-    expect(d.signOut).toHaveBeenCalledOnce();
+    expect(d.discardSession).toHaveBeenCalledOnce();
+    expect(d.discardSession).toHaveBeenCalledWith('auser');
+    expect(d.restoreSession).toHaveBeenCalledWith('user-b');
     expect(d.clearTabUser).toHaveBeenCalledOnce();
   });
 
-  it('does not sign out when merely superseded (the tab is still logged in)', async () => {
+  it('tab shows ANOTHER user whose tokens are intact: makes them current again and keeps the tab', async () => {
+    const d = deps({
+      tabUsername: () => 'user-b',
+      restoreSession: vi.fn().mockResolvedValue(true),
+    });
+    await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
+    expect(d.discardSession).toHaveBeenCalledWith('auser');
+    expect(d.clearTabUser).not.toHaveBeenCalled();
+  });
+
+  it('tab shows a user who is still current in storage (signed in after this attempt): keeps the tab', async () => {
+    const d = deps({
+      tabUsername: () => 'user-c',
+      liveUsername: async () => 'user-c',
+    });
+    await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
+    expect(d.discardSession).toHaveBeenCalledWith('auser');
+    expect(d.restoreSession).not.toHaveBeenCalled();
+    expect(d.clearTabUser).not.toHaveBeenCalled();
+  });
+
+  it('a third user is current in storage and the tab logged out: discards only this attempt, never touches the tab', async () => {
+    const d = deps({ tabUsername: () => undefined, liveUsername: async () => 'user-c' });
+    await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
+    expect(d.discardSession).toHaveBeenCalledOnce();
+    expect(d.discardSession).toHaveBeenCalledWith('auser');
+    expect(d.clearTabUser).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a tab that changed user while the discard was running', async () => {
+    let tab: string | undefined = 'user-b';
+    const d = deps({
+      tabUsername: () => tab,
+      discardSession: vi.fn(async () => {
+        tab = 'user-d'; // a fresh sign-in landed during the wait
+      }),
+    });
+    await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
+    expect(d.clearTabUser).not.toHaveBeenCalled();
+  });
+
+  it('does not discard when merely superseded (the tab is still logged in)', async () => {
     const d = deps();
     const g = createReauthGuard(d);
     supersedeReauthAttempts();
     await expect(g.beforeSuccess()).rejects.toSatisfy(isReauthAbortedError);
-    expect(d.signOut).not.toHaveBeenCalled();
+    expect(d.discardSession).not.toHaveBeenCalled();
   });
 
   it('rejects an unchanged auth_time (a refresh restored the old tokens), keeping the session', async () => {
     const d = deps({ liveAuthTime: async () => 1000 });
     await expect(createReauthGuard(d).beforeSuccess()).rejects.toSatisfy(isReauthNotFreshError);
-    expect(d.signOut).not.toHaveBeenCalled();
+    expect(d.discardSession).not.toHaveBeenCalled();
   });
 
   it('rejects a missing auth_time', async () => {

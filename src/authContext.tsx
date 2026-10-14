@@ -29,7 +29,11 @@ import {
 import { authenticateWith, reauthenticateWith } from './authenticate';
 import { claimsFromSession } from './claims';
 import { createMapSignInResult } from './mapSignInResult';
-import { checkSessionOnMount, isRefreshTokenRejected } from './sessionGuards';
+import {
+  checkSessionOnMount,
+  isRefreshTokenRejected,
+  isTokenClearingError,
+} from './sessionGuards';
 import type {
   AuthenticateOptions,
   AuthState,
@@ -286,6 +290,17 @@ export function createCognitoAuth<User extends object>(
               userAttributeKey: 'email',
               confirmationCode: verificationCode,
             });
+            // The email_verified / email claims are only in a freshly issued
+            // ID token. The address is confirmed by now, so a failed refresh
+            // must not fail the call: fall back to loading what is stored.
+            try {
+              await fetchAuthSession({ forceRefresh: true });
+            } catch (err) {
+              // Tokens Amplify itself clears are dead: the Hub listener logs
+              // the tab out, so do not carry on as if the session were fine.
+              if (isTokenClearingError(err)) throw err;
+              // Transient: the claims stay stale until the next refresh.
+            }
             await loadUserFromSession();
           },
         };

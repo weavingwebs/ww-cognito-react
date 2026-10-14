@@ -110,7 +110,9 @@ export type AuthStateLoggedIn<User> = {
   /**
    * Signs the current user in again without signing out, e.g. to get a fresh
    * `auth_time`. The live session is untouched unless the attempt succeeds.
-   * Throws `ReauthAbortedException` / `ReauthNotFreshException` (see README).
+   * Throws `ReauthAbortedException` / `ReauthNotFreshException`, or
+   * `AmplifyInternalsChangedException` if a changed Amplify broke the sign-in
+   * (see README).
    */
   reauthenticate: (
     pass: string,

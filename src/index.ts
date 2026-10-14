@@ -21,6 +21,8 @@ export {
   REAUTH_ABORTED_EXCEPTION,
   REAUTH_NOT_FRESH_EXCEPTION,
   REAUTH_NOT_LOGGED_IN_EXCEPTION,
+  AMPLIFY_INTERNALS_CHANGED_EXCEPTION,
+  isAmplifyInternalsChangedError,
   isReauthAbortedError,
   isReauthNotFreshError,
   isReauthNotLoggedInError,

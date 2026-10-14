@@ -1,6 +1,7 @@
 import { signIn } from 'aws-amplify/auth';
 import {
   createReauthGuard,
+  isAmplifyInternalsChangedError,
   createSupersessionGuard,
   defaultReauthDeps,
   signInIgnoringSession,
@@ -101,8 +102,20 @@ export async function reauthenticateWith(deps: {
   // this is the only chance to see that the session changed since this tab
   // loaded it.
   await guard.beforeStep();
-  const result = await signInIgnoringSession(
-    signInInput(username, pass, authFlowType, clientMetadata),
-  );
+  let result: Awaited<ReturnType<typeof signInIgnoringSession>>;
+  try {
+    result = await signInIgnoringSession(
+      signInInput(username, pass, authFlowType, clientMetadata),
+    );
+  } catch (err) {
+    if (isAmplifyInternalsChangedError(err)) {
+      // The tokens may be stored although the user was not loaded. Run the
+      // success checks so a session this tab logged out of meanwhile is still
+      // discarded; if they fail, that error (which already did the discarding)
+      // is the more useful one.
+      await guard.beforeSuccess();
+    }
+    throw err;
+  }
   return deps.mapSignInResult(result, clientMetadata, guard);
 }

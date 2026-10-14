@@ -17,10 +17,13 @@ vi.mock('./reauth', () => ({
   signInIgnoringSession: h.signInIgnoringSession,
   createReauthGuard: h.createReauthGuard,
   createSupersessionGuard: h.createSupersessionGuard,
+  isAmplifyInternalsChangedError: (err: unknown) =>
+    (err as { name?: unknown } | null)?.name === 'AmplifyInternalsChangedException',
   defaultReauthDeps: {
     liveUsername: vi.fn(),
     liveAuthTime: vi.fn().mockResolvedValue(900),
-    signOut: vi.fn(),
+    discardSession: vi.fn(),
+    restoreSession: vi.fn(),
   },
 }));
 

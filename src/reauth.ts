@@ -3,11 +3,11 @@ import {
   fetchAuthSession,
   getCurrentUser,
   signIn,
-  signOut,
   type SignInInput,
   type SignInOutput,
 } from 'aws-amplify/auth';
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito';
+import { discardStoredSession, restoreStoredSession } from './storedSession';
 
 type GetTokens = typeof cognitoUserPoolsTokenProvider.getTokens;
 
@@ -26,6 +26,13 @@ export const isReauthAbortedError =(err: unknown): boolean =>
 export const isReauthNotFreshError = (err: unknown): boolean =>
   (err as { name?: unknown } | null | undefined)?.name ===
   REAUTH_NOT_FRESH_EXCEPTION;
+
+export const AMPLIFY_INTERNALS_CHANGED_EXCEPTION =
+  'AmplifyInternalsChangedException';
+
+export const isAmplifyInternalsChangedError = (err: unknown): boolean =>
+  (err as { name?: unknown } | null | undefined)?.name ===
+  AMPLIFY_INTERNALS_CHANGED_EXCEPTION;
 
 export function reauthError(name: string, message: string): Error {
   const err = new Error(message);
@@ -47,10 +54,9 @@ export function signInIgnoringSession(
   input: SignInInput,
   hooks?: { onHiddenRead?: () => void },
 ): Promise<SignInOutput> {
-  let hidden = true;
+  let reads = 0;
   const getTokens: GetTokens = (options) => {
-    if (hidden) {
-      hidden = false;
+    if (reads++ === 0) {
       hooks?.onHiddenRead?.();
       return Promise.resolve(null);
     }
@@ -59,7 +65,30 @@ export function signInIgnoringSession(
   const ctx = createAmplifyContext(Amplify.getConfig(), {
     Auth: { tokenProvider: { getTokens } },
   });
-  return signIn(ctx, input);
+  return signIn(ctx, input).catch((err: unknown) => {
+    // Amplify throws this when the session read right after it stores the new
+    // tokens finds no user. Here that read is the 2nd (the 1st is the hidden
+    // one), so if the hidden null was the ONLY read it was consumed by that
+    // late read: Amplify's read order has changed. Any other cause (storage
+    // that drops writes, another tab clearing the session in between) leaves
+    // reads > 1 and is rethrown as it was.
+    if (
+      (err as { name?: unknown } | null)?.name ===
+        'UnexpectedSignInInterruptionException' &&
+      reads === 1
+    ) {
+      const changed = reauthError(
+        AMPLIFY_INTERNALS_CHANGED_EXCEPTION,
+        'Amplify has changed the order of its session reads, so the sign-in ' +
+          'could not be completed. The new tokens may already be stored with ' +
+          "the user not loaded; reload the page. Upgrade aws-amplify only " +
+          "with this library's tests passing.",
+      );
+      (changed as Error & { cause?: unknown }).cause = err;
+      throw changed;
+    }
+    throw err;
+  });
 }
 
 // Amplify keeps one global sign-in state, so only the latest attempt (or plain
@@ -109,7 +138,11 @@ export type ReauthGuardDeps = {
   // rethrow anything that is not a plain "no session" (e.g. network errors).
   liveUsername: () => Promise<string | undefined>;
   liveAuthTime: () => Promise<number | undefined>;
-  signOut: () => Promise<unknown>;
+  // Removes the stored session of that one user and starts revoking its
+  // refresh token (never the current user's by default: see storedSession).
+  discardSession: (username: string) => Promise<unknown>;
+  // Makes that user current again if no one is (see restoreStoredSession).
+  restoreSession: (username: string) => Promise<boolean>;
   // Resets this tab's logged-in state, for when the session it showed has been
   // replaced and discarded.
   clearTabUser: () => void;
@@ -131,7 +164,8 @@ export const defaultReauthDeps = {
       .auth_time;
     return typeof authTime === 'number' ? authTime : undefined;
   },
-  signOut: () => signOut(),
+  discardSession: (username: string) => discardStoredSession(username),
+  restoreSession: (username: string) => restoreStoredSession(username),
 };
 
 export function createReauthGuard(deps: ReauthGuardDeps): ReauthGuard {
@@ -167,10 +201,25 @@ export function createReauthGuard(deps: ReauthGuardDeps): ReauthGuard {
       } catch (err) {
         const tabUser = deps.tabUsername();
         if (isReauthAbortedError(err) && tabUser !== deps.username) {
-          await deps.signOut();
-          // The tab showed another user, whose tokens this attempt has just
-          // overwritten & discarded: it must not keep showing them.
-          if (tabUser !== undefined) deps.clearTabUser();
+          // By name, not signOut(): another tab may have signed a third user
+          // in since, and signing out would revoke theirs.
+          await deps.discardSession(deps.username);
+          // This attempt may have taken LastAuthUser from the user the tab
+          // still shows (their tokens are untouched). Keep that tab if the
+          // user is still current or can be made current again; otherwise
+          // their session is gone and the tab must not keep showing it. The tab is
+          // re-read before clearing: it may have changed while we waited.
+          if (tabUser !== undefined) {
+            let keep = false;
+            try {
+              keep =
+                (await deps.liveUsername()) === tabUser ||
+                (await deps.restoreSession(tabUser));
+            } catch {
+              // Treat as gone.
+            }
+            if (!keep && deps.tabUsername() === tabUser) deps.clearTabUser();
+          }
         }
         throw err;
       }

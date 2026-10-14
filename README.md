@@ -93,19 +93,27 @@ Cognito expires the session server-side and the library's callbacks stop working
   (`isReauthAbortedError`).
 - The tab and the stored session are checked to still be the same user before the sign-in request and before each
   step; if not, the call throws `ReauthAbortedException`. Amplify stores the new tokens the moment it succeeds, so a
-  change made in another tab between the last check and that write cannot be detected there: if the tab logged out
-  while the final answer was in flight, or now shows a different user, the session that answer created is signed out
-  again (and the tab reset in the different-user case, since the other user's tokens were overwritten). This only
-  reacts to this tab's view and the stored session at the check; a logout or sign-in as another user in another tab
-  inside that window is not detected.
+  change made in another tab between the last check and that write cannot be detected there. If the tab logged out
+  while the final answer was in flight, or now shows a different user, the session that answer created is discarded
+  *by username* (never `signOut()`, which would revoke whoever is current): that user's keys are removed and their
+  refresh token revoked on a best-effort basis (the revoke can fail, e.g. offline, leaving the token valid
+  server-side until it expires). `LastAuthUser` is removed only if it still names that user. If the attempt had
+  taken `LastAuthUser` from the user the tab shows, that user is made current again when their tokens are intact;
+  otherwise the tab is reset. If another user signed in *before* the attempt's tokens were stored, the attempt had
+  already taken `LastAuthUser` from them, so they are logged out (tokens left stored, not revoked), as before.
+  A logout or sign-in as another user in another tab inside the check-to-write window is not detected.
 - On success the session's `auth_time` must be newer than before. A token refresh landing at the same moment can put
   the old tokens back; that throws `ReauthNotFreshException` (`isReauthNotFreshError`) and the caller should retry.
 - If this device is remembered (Cognito device tracking), Cognito may skip the MFA challenge for it. `auth_time` is
   then fresh although no second factor was re-proved. If you gate sensitive actions on a re-proved factor, do not use
   a pool with remembered devices, or enforce it server-side.
 - It relies on Amplify internals: the already-signed-in check must be the first token read in `signIn`, before any
-  request. `reauth.test.ts` pins this against real Amplify. If a later Amplify changes it, a failure may not be a
-  clean refusal (the sign-in could store tokens and then throw), so run the tests when bumping `aws-amplify`.
+  request. `reauth.test.ts` pins this against real Amplify, so run the tests when bumping `aws-amplify`. If a later
+  Amplify changes it, the sign-in can store the new tokens and then fail; `reauthenticate` then throws
+  `AmplifyInternalsChangedException` (`isAmplifyInternalsChangedError`) when the hidden read was the only read made.
+  The new tokens may be stored with the user not loaded, so reload the page. (The same underlying Amplify error from
+  any other cause, e.g. storage that drops writes or another tab clearing the session in that instant, is rethrown
+  as it was.) The checks above still run first, so a session the tab logged out of meanwhile is discarded.
 
 **`clientMetadata`.** Cognito does not carry `ClientMetadata` between calls, so it is re-sent on every
 `confirmSignIn` of the exchange. Overrides: `completeNewPasswordChallenge(pw, attrs, metadata)` and

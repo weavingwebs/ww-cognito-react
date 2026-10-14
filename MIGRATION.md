@@ -77,6 +77,15 @@ into `RESET_PASSWORD`/`CONFIRM_SIGN_UP` sign-in steps rather than throwing - v3 
 with the original exception names, so existing `err.name === 'PasswordResetRequiredException'`-style
 `.catch()` blocks keep working on both the fast and full path without changes.
 
+## Do not run v2 and v3 builds side by side on one origin and client id
+
+v2 (`amazon-cognito-identity-js`) and v3 (Amplify) read the same localStorage keys
+(`CognitoIdentityServiceProvider.<clientId>.<user>.*`), including `clockDrift`, but store it differently: v2 as
+seconds (`now - iat`), v3 as milliseconds with the opposite sign (`iat * 1000 - now`). Each reads the other's value
+wrongly, so during a staggered rollout a v2 app can treat fresh tokens as expiring early, or (with a slow local
+clock) keep sending expired ones. Deploy all apps on one origin and client id together, or give them separate
+client ids. (Derived from reading both libraries' source, not measured.)
+
 ## Not migrated by either path
 
 `rateLimit()` (v2's client-side throttle) is dropped entirely in v3 - it read a `localStorage` key that
