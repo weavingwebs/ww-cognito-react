@@ -17,7 +17,13 @@ vi.mock('./reauth', async (orig) => ({
 import { confirmSignIn, signIn } from 'aws-amplify/auth';
 import { authenticateWith, reauthenticateWith } from './authenticate';
 import { createMapSignInResult } from './mapSignInResult';
-import { isReauthAbortedError, isReauthNotFreshError } from './reauth';
+import {
+  isAmplifyInternalsChangedError,
+  isReauthAbortedError,
+  isReauthNotFreshError,
+  reauthError,
+  AMPLIFY_INTERNALS_CHANGED_EXCEPTION,
+} from './reauth';
 
 // The real guard + the real mapSignInResult, with only Amplify's sign-in and
 // the session lookups faked: how the pieces are wired together.
@@ -30,7 +36,8 @@ const totp = {
 let tab: string | undefined;
 let live: string | undefined;
 let liveAuth: number | undefined;
-const signOutFn = vi.fn().mockResolvedValue(undefined);
+const discardFn = vi.fn().mockResolvedValue(undefined);
+const restoreFn = vi.fn().mockResolvedValue(false);
 const clearTabUser = vi.fn();
 const load = vi.fn().mockResolvedValue(undefined);
 
@@ -46,7 +53,8 @@ const reauth = (over: { startAuthTime?: number | undefined } = {}) =>
     guardDeps: {
       liveUsername: async () => live,
       liveAuthTime: async () => liveAuth,
-      signOut: signOutFn,
+      discardSession: discardFn,
+      restoreSession: restoreFn,
     },
   });
 
@@ -88,7 +96,7 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
     // Start and post-success lookups both see 1500, which is not > 1500.
     await expect(reauth()).rejects.toSatisfy(isReauthNotFreshError);
     expect(load).not.toHaveBeenCalled();
-    expect(signOutFn).not.toHaveBeenCalled();
+    expect(discardFn).not.toHaveBeenCalled();
   });
 
   it('challenge: logout during the in-flight final answer discards the session', async () => {
@@ -100,11 +108,12 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
       return done;
     }) as never);
     await expect(first.respondToTotpChallenge('123456')).rejects.toSatisfy(isReauthAbortedError);
-    expect(signOutFn).toHaveBeenCalledOnce();
+    expect(discardFn).toHaveBeenCalledOnce();
+    expect(discardFn).toHaveBeenCalledWith('user-a');
     expect(load).not.toHaveBeenCalled();
   });
 
-  it('challenge: the tab became another user during the in-flight answer -> signed out & tab reset', async () => {
+  it('challenge: the tab became another user during the in-flight answer -> discarded by name & tab reset', async () => {
     h.signInIgnoringSession.mockResolvedValue(totp);
     const first = await reauth();
     if (first.result !== 'TOTP_REQUIRED') throw new Error('unreachable');
@@ -113,8 +122,28 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
       return done;
     }) as never);
     await expect(first.respondToTotpChallenge('123456')).rejects.toSatisfy(isReauthAbortedError);
-    expect(signOutFn).toHaveBeenCalledOnce();
+    expect(discardFn).toHaveBeenCalledOnce();
     expect(clearTabUser).toHaveBeenCalledOnce();
+  });
+
+  it('internals changed, nothing else changed: rethrows it and leaves the session alone', async () => {
+    h.signInIgnoringSession.mockImplementation(async () => {
+      liveAuth = 3000; // Amplify stored the new tokens before it failed
+      throw reauthError(AMPLIFY_INTERNALS_CHANGED_EXCEPTION, 'x');
+    });
+    await expect(reauth()).rejects.toSatisfy(isAmplifyInternalsChangedError);
+    expect(discardFn).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('internals changed after the tab logged out: the possibly-stored session is discarded', async () => {
+    // The pre-sign-in check passes; the tab logs out while the request runs.
+    h.signInIgnoringSession.mockImplementation(async () => {
+      tab = undefined;
+      throw reauthError(AMPLIFY_INTERNALS_CHANGED_EXCEPTION, 'x');
+    });
+    await expect(reauth()).rejects.toSatisfy(isReauthAbortedError);
+    expect(discardFn).toHaveBeenCalledWith('user-a');
   });
 
   it('a stale plain-authenticate challenge callback cannot answer a newer re-auth', async () => {
@@ -125,7 +154,6 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
       authFlowType: 'USER_SRP_AUTH',
       mapSignInResult: createMapSignInResult(load),
       loadUserFromSession: load,
-      forceSignOut: vi.fn(),
     });
     if (old.result !== 'TOTP_REQUIRED') throw new Error('unreachable');
 
@@ -147,7 +175,6 @@ describe('reauthenticateWith (real guard, real mapSignInResult)', () => {
       authFlowType: 'USER_SRP_AUTH',
       mapSignInResult: createMapSignInResult(load),
       loadUserFromSession: load,
-      forceSignOut: vi.fn(),
     });
     await expect(first.respondToTotpChallenge('1')).rejects.toSatisfy(isReauthAbortedError);
     expect(confirmSignIn).not.toHaveBeenCalled();

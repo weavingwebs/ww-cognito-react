@@ -1,5 +1,69 @@
 # Changelog
 
+## 3.3.0
+
+### Behaviour changes
+
+- **User loads are coalesced and cross-checked, with no option needed.** Concurrent `loadUserFromSession` calls are
+  merged (a caller arriving mid-load gets one shared follow-up run, so a sign-in never gets the previous user), and
+  the three reads in a load are repeated if another tab switched user between them. If they still disagree the load
+  rejects with `UserChangedException`, which can now come out of `authenticate`, `refreshSession`, `verifyEmail` and
+  the mount check (which then logs the tab out).
+
+- **`authenticate` with `onExistingSession: 'replace'` (the default) no longer signs out first.** In 3.1/3.2 it
+  revoked the existing session *before* the password was checked, so a wrong password logged the old user out. It now
+  signs in again ignoring the stored session (the `signInIgnoringSession` mechanism `reauthenticate` uses; only after
+  Amplify has refused with `UserAlreadyAuthenticatedException`, so a normal login is unchanged) and cleans up the
+  replaced session only once Amplify reports success. The cleanup names the new user from Amplify's own `signedIn`
+  event (falling back to `LastAuthUser`), never from the typed login: a different user's keys are removed and their
+  refresh token revoked best-effort (only if revocable, i.e. `origin_jti`); for the same user the old refresh token is
+  revoked on the same terms if it changed. If neither the new user nor `LastAuthUser` can be determined, nothing is
+  touched. As `reauthenticate`, this depends on Amplify's read order; if that changes, or Amplify fails after
+  storing the tokens, `authenticate` still cleans up the replaced session but does NOT load whoever is stored (it
+  cannot tell that they are the user this attempt signed in), then throws `AmplifyInternalsChangedException` / the
+  original error: reload the page. Leftovers that cannot be closed (a failed revoke, a tab
+  closed mid-way, two tabs replacing at once) are listed in the README. `forceSignOut` is still exported but no longer
+  used by `authenticate`. Also: a same-user replace now revokes the refresh token it replaced, which `reauthenticate`
+  still does not.
+
+### Added
+
+- **`<AuthProvider options={...}>`**, all opt-in (no options = 3.2 behaviour): `syncTabs` (follow other tabs'
+  login/logout, refresh claims on token refresh), `onUserChange` (`'reload'` | callback, when another tab signed in as
+  a different user; the load rejects with `UserChangedException`), `strictTokens` (`getIdJwt`/`getAccessJwt`
+  throw on transient failures and on a user change instead of returning `null`), `retrySessionCheck` (retry the
+  mount check, then stay at `isLoggedIn: null` with `sessionCheckFailed` / `retrySessionCheck()`). `AuthProviderOptions`,
+  `OnUserChange`, `UserChange`, `isUserChangedError` and `USER_CHANGED_EXCEPTION` are exported (the error is an `Error`
+  named `UserChangedException`, not a class); `/legacy`'s `CognitoAuthProvider` forwards `options`. See the README. Defaults are unchanged because s4a/hermes/wheels depend
+  on the getters returning `null` and on `isLoggedIn` only ever being `true`/`false` after loading.
+- **`sendEmailVerificationCode()` / `confirmEmailVerificationCode(code)`** on the signed-in state (additive; the
+  state type gains required fields, so hand-written mocks typed as it need them).
+- **`authenticate(..., { confirmReplace })`** (optional, default unchanged: silent replace). Called before the
+  sign-in when the stored session is a different login (advisory match), with `{ username, email? }`; resolving
+  `false` throws `ReplaceCancelledException` (`isReplaceCancelledError`, `REPLACE_CANCELLED_EXCEPTION`,
+  `ConfirmReplace` type) with nothing touched. Not called for an empty submit. Re-checked after it resolves (the stored
+  user changing meanwhile cancels; a newer attempt aborts). See the README.
+- **`AmplifyInternalsChangedException`** (`isAmplifyInternalsChangedError`, `AMPLIFY_INTERNALS_CHANGED_EXCEPTION`):
+  `reauthenticate` (and, since the replace change below, `authenticate`'s replace path) throws it when Amplify's late "who is signed in" read fails after the sign-in and the hidden read
+  was the only read made, i.e. a newer Amplify no longer reads the session in the order `signInIgnoringSession`
+  relies on. The new tokens may be stored with the user not loaded, so reload the page. The session checks still run
+  first (a tab that logged out meanwhile has the session discarded). The same Amplify error from any other cause is
+  rethrown unchanged. Normally unreachable: `yarn test` pins the order for the supported Amplify version.
+
+### Fixed
+
+- `reauthenticate`: when the tab logged out (or changed user) while the final answer was in flight, the session the
+  attempt had just stored is now discarded by username (its keys removed, its refresh token revoked best-effort,
+  `LastAuthUser` removed only if it still names that user). It used to call `signOut()`, which revokes whichever user
+  is current and so could revoke a third user another tab had signed in afterwards. If that third user signed in
+  *before* the attempt's tokens were stored they are logged out as before (tokens left stored, not revoked). If the
+  attempt had taken `LastAuthUser` from the user the tab shows, that user is made current again when their tokens are
+  intact instead of the tab being reset. The revoke is not awaited, so the tab is never held up by the network.
+- `updateEmail(...).verifyEmail(code)` now forces a token refresh before reloading the user, so `emailVerified` and
+  the `email` claim are current straight away (before, they stayed stale until the next refresh). A transient refresh
+  failure is ignored (the address is already confirmed); a definitive one logs the tab out as usual and the call
+  rejects.
+
 ## 3.2.0
 
 All additive. `authenticate(email, pass)` makes the same Amplify calls as in 3.1.0 and its existing option

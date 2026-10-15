@@ -1,9 +1,12 @@
 // @vitest-environment node
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Amplify } from 'aws-amplify';
 import { confirmSignIn, fetchAuthSession, signIn } from 'aws-amplify/auth';
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito';
 import { signInIgnoringSession } from './reauth';
+import { authenticateWith } from './authenticate';
+import { createMapSignInResult } from './mapSignInResult';
+import { readStoredSession } from './storedSession';
 
 // NOTE: runs real Amplify against a faked Cognito endpoint, to pin the
 // internals signInIgnoringSession relies on. Expect to revisit on an Amplify
@@ -12,11 +15,12 @@ const b64 = (o: object) =>
   btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const jwt = (claims: object) => `${b64({ alg: 'none' })}.${b64(claims)}.sig`;
 const now = () => Math.floor(Date.now() / 1000);
+let who = 'auser';
 const tokensFor = (authTime: number) => {
-  const claims = { sub: 'auser', exp: now() + 3600, iat: now(), auth_time: authTime };
+  const claims = { sub: who, exp: now() + 3600, iat: now(), auth_time: authTime, origin_jti: `j-${authTime}` };
   return {
-    AccessToken: jwt({ ...claims, username: 'auser' }),
-    IdToken: jwt({ ...claims, 'cognito:username': 'auser' }),
+    AccessToken: jwt({ ...claims, username: who }),
+    IdToken: jwt({ ...claims, 'cognito:username': who, email: `${who}@x.co` }),
     RefreshToken: `refresh-${authTime}`,
   };
 };
@@ -31,6 +35,7 @@ const storage = {
 
 let respond: (target: string, body: Record<string, unknown>) => { status: number; body: object };
 let calls: string[] = [];
+let revokes: { url: string; token: string }[] = [];
 
 const authTime = async () =>
   (await fetchAuthSession()).tokens?.idToken?.payload.auth_time ?? null;
@@ -56,7 +61,7 @@ const srp = (after: () => { status: number; body: object }) =>
               SALT: 'abcdef0123456789',
               SECRET_BLOCK: 'c2VjcmV0',
               SRP_B: '1234567890abcdef1234567890abcdef1234567890abcdef',
-              USER_ID_FOR_SRP: 'auser',
+              USER_ID_FOR_SRP: who,
             },
           },
         }
@@ -84,6 +89,9 @@ beforeAll(() => {
   globalThis.fetch = (async (_url: unknown, init: { headers: Record<string, string>; body?: unknown }) => {
     const target = new Headers(init.headers).get('x-amz-target') ?? '';
     calls.push(target.split('.')[1]);
+    if (target.indexOf('RevokeToken') >= 0) {
+      revokes.push({ url: String(_url), token: JSON.parse(String(init.body)).Token });
+    }
     const { status, body } = respond(target, JSON.parse(String(init.body ?? '{}')));
     return new Response(JSON.stringify(body), {
       status,
@@ -94,6 +102,7 @@ beforeAll(() => {
 
 const seedSession = async () => {
   calls = [];
+  revokes = [];
   data.clear();
   // Seed a live session with an old auth_time.
   respond = srp(signedIn(1000));
@@ -132,6 +141,25 @@ describe.each(flows)('signInIgnoringSession (%s)', (flow) => {
     }
     expect(order.filter((o) => o === 'hidden')).toHaveLength(1);
     expect(order[0]).toBe('hidden');
+  });
+
+  it('when the new tokens are not persisted, Amplify\'s own error is rethrown unwrapped (read order intact)', async () => {
+    // A storage that drops the access token makes the read right after the
+    // store find no user: UnexpectedSignInInterruptionException from a REAL
+    // Amplify, with the read order as expected, so it must not be relabelled.
+    const setItem = storage.setItem;
+    storage.setItem = async (k: string, v: string) => {
+      if (k.endsWith('.accessToken')) data.delete(k);
+      else await setItem(k, v);
+    };
+    respond = srp(signedIn(2000));
+    try {
+      await expect(signInIgnoringSession(input)).rejects.toMatchObject({
+        name: 'UnexpectedSignInInterruptionException',
+      });
+    } finally {
+      storage.setItem = setItem;
+    }
   });
 
   it('a wrong password rejects & leaves the live session intact', async () => {
@@ -207,5 +235,89 @@ describe.each(flows)('signInIgnoringSession (%s)', (flow) => {
     expect(await authTime()).toBe(1000);
     expect((await attempt).isSignedIn).toBe(true);
     expect(await authTime()).toBe(4000);
+  });
+});
+
+// The whole authenticate path (plain signIn refused -> signInIgnoringSession ->
+// guard -> cleanup) against real Amplify and a fake Cognito.
+const K = 'CognitoIdentityServiceProvider.client.';
+const idle = () => new Promise((r) => setTimeout(r, 0));
+const withRevoke = (inner: typeof respond): typeof respond => (target, body) =>
+  target.indexOf('RevokeToken') >= 0 ? { status: 200, body: {} } : inner(target, body);
+const replaceLogin = (login: string, flow: Flow) => {
+  who = login;
+  return authenticateWith({
+    email: login,
+    pass: 'pw',
+    authFlowType: flow,
+    mapSignInResult: createMapSignInResult(async () => undefined),
+    loadUserFromSession: async () => undefined,
+  });
+};
+
+describe.each(flows)("'replace' through authenticate (%s, real Amplify, fake Cognito)", (flow) => {
+  beforeEach(async () => {
+    who = 'auser';
+    input = { ...input, options: { authFlowType: flow } };
+    await seedSession();
+  });
+  afterAll(() => void (who = 'auser'));
+
+  it('a wrong password leaves the existing user signed in and unrevoked', async () => {
+    respond = withRevoke(srp(wrongPassword));
+    await expect(replaceLogin('user-b', flow)).rejects.toMatchObject({
+      name: 'NotAuthorizedException',
+    });
+    await idle();
+    expect(revokes).toEqual([]);
+    expect((await readStoredSession())?.username).toBe('auser');
+    expect(await authTime()).toBe(1000);
+  });
+
+  it('success: the new user is current, the old one is discarded and revoked at the Cognito endpoint', async () => {
+    respond = withRevoke(srp(signedIn(2000)));
+    expect(await replaceLogin('user-b', flow)).toEqual({ result: 'SUCCESS' });
+    await idle();
+    expect((await readStoredSession())?.username).toBe('user-b');
+    expect(data.has(`${K}auser.refreshToken`)).toBe(false);
+    expect(revokes).toEqual([
+      { url: 'https://cognito-idp.eu-west-2.amazonaws.com/', token: 'refresh-1000' },
+    ]);
+  });
+
+  it('a TOTP challenge leaves the old user usable until the code is accepted, then replaces it', async () => {
+    respond = withRevoke((target, body) =>
+      body.ChallengeName === 'SOFTWARE_TOKEN_MFA' ? signedIn(3000)() : srp(totpChallenge)(target, body),
+    );
+    const step = await replaceLogin('user-b', flow);
+    if (step.result !== 'TOTP_REQUIRED') throw new Error('expected a TOTP challenge');
+    await idle();
+    expect(revokes).toEqual([]);
+    expect(data.get(`${K}auser.refreshToken`)).toBe('refresh-1000');
+    expect((await fetchAuthSession()).tokens?.accessToken.payload.username).toBe('auser');
+
+    expect(await step.respondToTotpChallenge('123456')).toEqual({ result: 'SUCCESS' });
+    await idle();
+    expect((await readStoredSession())?.username).toBe('user-b');
+    expect(data.has(`${K}auser.refreshToken`)).toBe(false);
+    expect(revokes.map((r) => r.token)).toEqual(['refresh-1000']);
+  });
+
+  it('an abandoned challenge followed by a wrong password leaves the old user alone', async () => {
+    respond = withRevoke(srp(totpChallenge));
+    await replaceLogin('user-b', flow);
+    respond = withRevoke(srp(wrongPassword));
+    await expect(replaceLogin('user-c', flow)).rejects.toMatchObject({ name: 'NotAuthorizedException' });
+    await idle();
+    expect(revokes).toEqual([]);
+    expect(data.get(`${K}auser.refreshToken`)).toBe('refresh-1000');
+  });
+
+  it('the same user again: keeps their session and revokes only the replaced refresh token', async () => {
+    respond = withRevoke(srp(signedIn(2000)));
+    await replaceLogin('auser', flow);
+    await idle();
+    expect(data.get(`${K}auser.refreshToken`)).toBe('refresh-2000');
+    expect(revokes.map((r) => r.token)).toEqual(['refresh-1000']);
   });
 });
