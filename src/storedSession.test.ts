@@ -13,7 +13,7 @@ import {
 
 const P = 'CognitoIdentityServiceProvider.client.';
 const b64 = (o: object) =>
-  btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  btoa(Array.from(new TextEncoder().encode(JSON.stringify(o)), (c) => String.fromCharCode(c)).join("")).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const jwt = (claims: object) => `${b64({ alg: 'none' })}.${b64(claims)}.sig`;
 const exp = () => Math.floor(Date.now() / 1000) + 3600;
 const data = new Map<string, string>();
@@ -163,6 +163,12 @@ describe('readStoredSession / isSameLogin', () => {
     });
   });
 
+  it('decodes a non-ASCII email as UTF-8', async () => {
+    seed('user-a', { email: 'zoë@exämple.com' });
+    data.set(`${P}LastAuthUser`, 'user-a');
+    expect((await readStoredSession())?.email).toBe('zoë@exämple.com');
+  });
+
   it('is null with no current user or no refresh token', async () => {
     expect(await readStoredSession()).toBeNull();
     seed('user-a');
@@ -209,6 +215,34 @@ describe('cleanUpReplacedSession', () => {
     await cleanUpReplacedSession(previous);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(data.has(`${P}user-a.refreshToken`)).toBe(true);
+  });
+
+  it('uses the reported new user, not LastAuthUser: another tab\'s refresh put the OLD user back as current', async () => {
+    seed('user-a');
+    seed('user-b');
+    data.set(`${P}LastAuthUser`, 'user-a'); // restored by a racing refresh of A
+    await cleanUpReplacedSession(previous, 'user-b');
+    expect(data.has(`${P}user-a.refreshToken`)).toBe(false);
+    expect(data.has(`${P}user-b.refreshToken`)).toBe(true);
+    expect(data.get(`${P}LastAuthUser`)).toBe('user-b'); // it named A, who was discarded: B is made current
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).Token).toBe('refresh-user-a');
+  });
+
+  it('uses the reported new user when the old one logged out in another tab (LastAuthUser gone)', async () => {
+    seed('user-a');
+    seed('user-b');
+    await cleanUpReplacedSession(previous, 'user-b');
+    expect(data.get(`${P}LastAuthUser`)).toBe('user-b');
+    expect(data.has(`${P}user-a.refreshToken`)).toBe(false);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a reported user that has no keys stored (name mismatch): falls back to LastAuthUser', async () => {
+    seed('user-a');
+    data.set(`${P}LastAuthUser`, 'user-a');
+    await cleanUpReplacedSession(previous, 'alias-with-no-keys');
+    expect(data.has(`${P}user-a.refreshToken`)).toBe(true); // same-user branch, token unchanged
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('no one is current (the new session was not stored): leaves the previous session alone', async () => {

@@ -1,9 +1,9 @@
 import { fetchAuthSession, signIn } from 'aws-amplify/auth';
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito';
 import {
-  cleanUpReplacedSession,
   isSameLogin,
   readStoredSession,
+  type StoredSession,
 } from './storedSession';
 
 export const ALREADY_SIGNED_IN_EXCEPTION = 'AlreadySignedInException';
@@ -86,8 +86,12 @@ export async function signInHandlingExistingSession(deps: {
   onExistingSession?: OnExistingSession;
   adoptSession?: () => Promise<unknown>;
   confirmReplace?: ConfirmReplace;
-  // Receives the cleanup to run once the new session has been stored.
-  onReplaced: (cleanup: () => Promise<void>) => void;
+  // Awaited just before the replacing sign-in; throws if this attempt has been
+  // superseded (e.g. while the confirm prompt was open).
+  beforeSignIn?: () => Promise<void>;
+  // Receives the session about to be replaced, to clean up once the new one
+  // has been stored.
+  onReplaced: (previous: StoredSession) => void;
 }): Promise<Awaited<ReturnType<typeof signIn>>> {
   const {
     login,
@@ -96,6 +100,7 @@ export async function signInHandlingExistingSession(deps: {
     onExistingSession = 'replace',
     adoptSession,
     confirmReplace,
+    beforeSignIn,
     onReplaced,
   } = deps;
   try {
@@ -127,23 +132,37 @@ export async function signInHandlingExistingSession(deps: {
       await clearLocalTokens();
       return doSignIn();
     }
-    const previous = await readStoredSession();
-    if (previous) {
-      if (confirmReplace && !isSameLogin(previous, login)) {
-        const proceed = await confirmReplace({
-          username: previous.username,
-          ...(previous.email !== undefined ? { email: previous.email } : {}),
-        });
-        if (!proceed) {
-          const cancelled = new Error('Replacing the existing session was declined');
-          cancelled.name = REPLACE_CANCELLED_EXCEPTION;
-          throw cancelled;
-        }
+    let previous = await readStoredSession();
+    if (previous && confirmReplace && !isSameLogin(previous, login)) {
+      const proceed = await confirmReplace({
+        username: previous.username,
+        ...(previous.email !== undefined ? { email: previous.email } : {}),
+      });
+      if (!proceed) throw replaceCancelled('Replacing the existing session was declined');
+      // The prompt can stay open for a long time: another tab may have
+      // changed the session since, and the user only agreed to replace the
+      // one they were shown.
+      const again = await readStoredSession();
+      // A different user now: they were never shown or asked about. (The same
+      // user with a rotated refresh token is fine; a vanished session leaves
+      // nothing to clean up.)
+      if (again && again.username !== previous.username) {
+        throw replaceCancelled(
+          'The stored session changed while waiting for confirmation; try again',
+        );
       }
-      onReplaced(() => cleanUpReplacedSession(previous));
+      previous = again;
     }
+    await beforeSignIn?.();
+    if (previous) onReplaced(previous);
     return doSignInIgnoringSession();
   }
+}
+
+function replaceCancelled(message: string): Error {
+  const cancelled = new Error(message);
+  cancelled.name = REPLACE_CANCELLED_EXCEPTION;
+  return cancelled;
 }
 
 function alreadySignedIn(): Error {
@@ -173,23 +192,47 @@ export async function checkSessionOnMount(deps: {
   loadUser: () => Promise<unknown>;
   clearCurrentUser: () => void;
   isStale: () => boolean;
+  // Opt-in: retry transient failures after each delay, and if they all fail
+  // call onTransientFailure and leave the state alone (neither logged in nor
+  // out) instead of logging the tab out.
+  retry?: {
+    delaysMs: number[];
+    onTransientFailure: () => void;
+    sleep?: (ms: number) => Promise<void>;
+  };
 }): Promise<void> {
-  const { fetchSession, loadUser, clearCurrentUser, isStale } = deps;
-  try {
-    const session = await fetchSession();
-    if (isStale()) return;
-    if (session.tokens) {
-      await loadUser();
-      return;
-    }
-  } catch (err) {
-    if (isStale()) return;
-    if (isTokenClearingError(err)) {
-      try {
-        await clearLocalTokens();
-      } catch {
-        // Best effort.
+  const { fetchSession, loadUser, clearCurrentUser, isStale, retry } = deps;
+  const sleep =
+    retry?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const session = await fetchSession();
+      if (isStale()) return;
+      if (session.tokens) {
+        await loadUser();
+        return;
       }
+      break;
+    } catch (err) {
+      if (isStale()) return;
+      if (isTokenClearingError(err)) {
+        try {
+          await clearLocalTokens();
+        } catch {
+          // Best-effort.
+        }
+        break;
+      }
+      if (retry) {
+        if (attempt < retry.delaysMs.length) {
+          await sleep(retry.delaysMs[attempt]);
+          if (isStale()) return;
+          continue;
+        }
+        retry.onTransientFailure();
+        return;
+      }
+      break;
     }
   }
   clearCurrentUser();

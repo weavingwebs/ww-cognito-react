@@ -1,5 +1,6 @@
 export type {
   AuthenticateOptions,
+  AuthProviderOptions,
   AuthState,
   AuthenticateResult,
   BuildUserFn,
@@ -29,3 +30,5 @@ export {
   isReauthNotFreshError,
   isReauthNotLoggedInError,
 } from './reauth';
+export type { OnUserChange, UserChange } from './userChange';
+export { USER_CHANGED_EXCEPTION, isUserChangedError } from './userChange';

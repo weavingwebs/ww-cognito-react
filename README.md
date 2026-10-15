@@ -47,7 +47,7 @@ await setTotpPreference('PREFERRED'); // or 'DISABLED'
 const { enabled, preferred } = await fetchMfaPreference();
 
 // Inside a component: const auth = useAuthContext(); (auth.authenticate exists once isLoggedIn !== null)
-// Don't sign out (and revoke) an existing valid session:
+// Don't replace an existing valid session:
 try {
   await auth.authenticate(email, pass, { onExistingSession: 'reject' });
 } catch (err) {
@@ -60,7 +60,8 @@ try {
 `onExistingSession` defaults to `'replace'`: the new login replaces whatever session is stored. Since 3.3.0 it signs in
 again *without* signing out first, so a wrong password or an abandoned challenge leaves the existing session alone;
 only once Amplify reports success is the replaced session cleaned up (a different user's keys are removed and
-their refresh token revoked best-effort; for the same user the old refresh token is revoked). It uses the same
+their refresh token revoked best-effort, and only if it is revocable, i.e. its access token has `origin_jti`; for the
+same user the old refresh token is revoked on the same terms if it changed). It uses the same
 Amplify-internals trick as `reauthenticate` (see below). With `'reject'` an existing valid session is never signed out or revoked. `authenticate` throws
 `AlreadySignedInException` and normally the session has been loaded into this tab (`isLoggedIn` becomes `true`);
 if loading it hit a transient error the exception is still thrown but `isLoggedIn` stays `false`, so redirect
@@ -80,11 +81,80 @@ await auth.authenticate(email, pass, {
 // resolving false throws ReplaceCancelledException (isReplaceCancelledError); nothing is touched.
 ```
 
-It is called only when the stored session belongs to a *different* login (the typed email or username does not match
-the stored user's username or ID-token email), never for `'reject'`, the same user, or when there is no session. It
-runs before the password is checked, and the UI is yours. Leftovers that cannot be closed: a failed revoke (offline)
-leaves the old refresh token valid until it expires, and a tab closed between Amplify storing the new tokens and the
-cleanup leaves the old user's keys in storage.
+It is called only when the stored session belongs to a *different* login, matched on the typed email or username
+against the stored username and ID-token email (case-insensitively). That match is advisory and best-effort: alias
+logins (phone, `preferred_username`) or an email changed since the token was issued can prompt for the same user, and
+a case-sensitive pool can fail to prompt for a different one; what is discarded afterwards never depends on it. It is
+never called for `'reject'`, the same user, an empty submit, or when there is no session. It runs before the password
+is checked, so it shows the signed-in user's identity to whoever is at the form (they could already read it from
+storage). It is re-checked afterwards: if the stored user changed while the prompt was open, `authenticate` throws
+`ReplaceCancelledException` rather than replace someone who was never asked about; if a newer `authenticate` started
+meanwhile, this one throws `ReauthAbortedException`. Starting `authenticate` always ends any pending challenge of an
+older attempt, even if the prompt is then declined. A hook that throws propagates unchanged with nothing touched.
+
+Leftovers that cannot be fully closed (the replaced user's refresh token then stays stored and valid until it
+expires, with nothing sweeping it later): a revoke that fails or is blocked (offline), a tab closed between Amplify
+storing the new tokens and the cleanup, two tabs replacing at once (including a third user stored by another tab
+while the sign-in was in flight), and a double submit. The cleanup names the new
+user from Amplify's own `signedIn` event rather than from `LastAuthUser`, so a token refresh of the old user landing
+in that instant does not misdirect it, but a refresh that lands *after* the cleanup can restore the old user. The old
+user's device keys are kept (as Amplify's own sign-out does), so on a shared machine a remembered device can still
+skip MFA for the old user.
+
+## Provider options (3.3.0, all opt-in)
+
+```tsx
+<AuthProvider
+  userPool={pool}
+  options={{ syncTabs: true, strictTokens: true, retrySessionCheck: true }}
+>
+```
+
+(`CognitoAuthProvider` in `/legacy` takes the same `options` prop.) With no `options` the provider adds no new
+*reactions*, but note two always-on changes: concurrent user loads are coalesced (a caller that arrives mid-load gets
+one follow-up run), and the three reads behind a load (session, current user, attributes) are repeated if another tab
+switched user between them. If they still disagree after three tries the load rejects with `UserChangedException`
+(also from `authenticate`, `refreshSession`, `verifyEmail` and the mount check, which then logs the tab out).
+
+- **`syncTabs`** keeps a tab in step with the session in browser storage (one session per origin + client id, shared
+  by every tab). It listens for Amplify's cross-tab `signedIn` / `signedOut` / `tokenRefresh` events but re-reads
+  storage rather than trusting them (removing one user's refresh token fires `signedOut` in every tab even when
+  another user is now current): a logout elsewhere logs this tab out (state only, never `signOut`), a login elsewhere
+  is adopted by a tab that was logged out, and a refresh or re-authentication elsewhere reloads the user so claims
+  (`emailVerified`, `mfaEnrolled`, ...) do not go stale. A tab never re-adopts the session it explicitly logged out of
+  (a refresh already in flight in another tab can write it back). While this tab is itself signing in, storage
+  legitimately flips to the new user first, so checks are postponed until that finishes (the marker covers Amplify's
+  calls and the load after them, never a `confirmReplace` prompt).
+- **`onUserChange`** is what happens when storage holds a *different* user than the tab shows (another tab signed in as
+  someone else). `'reload'` (the default with `syncTabs`) reloads the page, at most once per target user. If the
+  reload is refused (already tried for that user, or no `sessionStorage` to guard against a loop) the tab is logged
+  out of the old user instead. A function `({ from, to }) => void` is called once per change instead; it receives raw
+  usernames (possibly emails), must not throw (ignored if it does) and **must itself stop presenting the old
+  user**: nothing else changes in this tab. In both forms the load that found the change rejects with
+  `UserChangedException` (`isUserChangedError`, `USER_CHANGED_EXCEPTION`). Without this option and without
+  `syncTabs` the tab silently switches user, as in 3.2 (the non-strict getters then return the new user's token to
+  code written for the old one). A refresh landing at the wrong instant can restore the old user and cause one extra
+  reload. If your app already has its own token/user mismatch reload (wheels does), do not enable the reload form too.
+- **`strictTokens`** changes `getIdJwt` / `getAccessJwt`. By default they return `null` for any failure, which is
+  indistinguishable from being logged out. Strict mode: a transient failure (network, throttling) throws; a session
+  Amplify has dropped locally logs this tab out (after a short re-check); and tokens that belong to a different user
+  than the state object the getter came from throw `UserChangedException` instead of reaching code written for the
+  old user (poll loops should rethrow it at once, not retry). This holds during this tab's own sign-in too, and for a
+  closure that still holds an old state object. It does not detect server-side revocation: the access token stays
+  usable until it expires. Callers must catch; the default is unchanged because existing consumers treat `null` as
+  "send without a token" or "retry". The getters only *throw*: unless `syncTabs` or `onUserChange` is also set, nothing
+  else happens in this tab after a `UserChangedException`, which keeps showing the old user until something reloads
+  or logs it out, so the caller must do that. A transient failure is rethrown as Amplify's own error (e.g. "A network
+  error has occurred."), so a caller that used `null` to tell "offline" from "expired" must catch it and decide for
+  itself (wheels' `useGraphql` needs changes before it can adopt this).
+- **`retrySessionCheck`**: the mount-time check normally logs the tab out on any failure (documented trade-off). With
+  this it retries (3 tries) and then stays at `isLoggedIn: null` with `sessionCheckFailed: true` and
+  `retrySessionCheck()` on the state, instead of reporting a logout. **Never treat `null` as "allowed"**: a gate
+  written `isLoggedIn === false ? redirect : <Protected/>` would stay open in that state, and anything that treats
+  `null` as "loading" must handle `sessionCheckFailed` or it will wait forever.
+
+The signed-in state also has `sendEmailVerificationCode()` and `confirmEmailVerificationCode(code)` to re-verify the
+current address (the latter refreshes the claims).
 
 ## Re-authentication, `clientMetadata` and claims (3.2.0)
 
@@ -107,7 +177,8 @@ Cognito expires the session server-side and the library's callbacks stop working
 
 - Always the signed-in user: the username is taken from the session, not the caller.
 - A fresh sign-in resets `auth_time`; `refreshSession()` does not (`iat`/`exp` move, `auth_time` stays).
-- The previous refresh token is not revoked, it just stops being used.
+- The previous refresh token is not revoked, it just stops being used (unlike a same-user `authenticate` replace
+  since 3.3.0, which revokes the one it replaced).
 - Amplify's Hub `signedIn` event fires, after the new tokens are stored.
 - Only the latest sign-in attempt can be answered (Amplify keeps one global sign-in state): starting another
   `reauthenticate` or `authenticate` makes the older attempt's callbacks throw `ReauthAbortedException`
@@ -131,7 +202,8 @@ Cognito expires the session server-side and the library's callbacks stop working
 - It relies on Amplify internals: the already-signed-in check must be the first token read in `signIn`, before any
   request. `reauth.test.ts` pins this against real Amplify, so run the tests when bumping `aws-amplify`. If a later
   Amplify changes it, the sign-in can store the new tokens and then fail; `reauthenticate` then throws
-  `AmplifyInternalsChangedException` (`isAmplifyInternalsChangedError`) when the hidden read was the only read made.
+  `AmplifyInternalsChangedException` (`isAmplifyInternalsChangedError`) when the hidden read was the only read made
+  (`authenticate`'s replace path does the same, after cleaning up the replaced session and reloading the tab).
   The new tokens may be stored with the user not loaded, so reload the page. (The same underlying Amplify error from
   any other cause, e.g. storage that drops writes or another tab clearing the session in that instant, is rethrown
   as it was.) The checks above still run first, so a session the tab logged out of meanwhile is discarded.

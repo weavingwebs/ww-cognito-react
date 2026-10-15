@@ -49,12 +49,13 @@ function cognitoEndpoint(): string {
 function decodePayload(jwt: string | null): Record<string, unknown> | null {
   try {
     const part = jwt?.split('.')[1];
-    return part
-      ? (JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as Record<
-          string,
-          unknown
-        >)
-      : null;
+    if (!part) return null;
+    const binary = atob(part.replace(/-/g, '+').replace(/_/g, '/'));
+    // UTF-8, not the Latin-1 string atob returns, so a non-ASCII email is not
+    // mangled.
+    return JSON.parse(
+      new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0))),
+    ) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -230,24 +231,37 @@ export function isSameLogin(stored: StoredSession, login: string): boolean {
 }
 
 // After a login has stored its new tokens over `previous`: clean up the
-// session it replaced. Decided from what is stored NOW, never from the typed
-// login (an alias such as a phone number or preferred_username would fool it):
-//  - a different user is current: discard the previous user by name;
-//  - the same user is current: the old refresh token was overwritten rather
-//    than revoked, so revoke it if it differs;
-//  - no one is current (or storage cannot be read): the new session was not
-//    stored as expected, so leave everything alone.
+// session it replaced. `newUsername` is the user Amplify reported signing in
+// (Hub `signedIn`, read right after it stored the tokens), which unlike
+// LastAuthUser cannot be changed by another tab's refresh or logout a moment
+// later. It is used only if keys really are stored under that name; otherwise
+// (or when unknown) LastAuthUser decides. Never decided from the typed login (an
+// alias such as a phone number or preferred_username would fool it):
+//  - a different user signed in: discard the previous user by name (this only
+//    removes LastAuthUser if it still names them);
+//  - the same user: the old refresh token was overwritten rather than revoked,
+//    so revoke it if it differs;
+//  - no one is current and no new user is known: the new session was not stored
+//    as expected, so leave everything alone.
 export async function cleanUpReplacedSession(
   previous: StoredSession,
+  newUsername?: string,
 ): Promise<void> {
   try {
     const prefix = keyPrefix();
     if (!prefix) return;
     const kv = storage();
-    const current = await kv.getItem(`${prefix}LastAuthUser`);
+    const known =
+      newUsername && (await kv.getItem(`${prefix}${newUsername}.refreshToken`))
+        ? newUsername
+        : null;
+    const current = known ?? (await kv.getItem(`${prefix}LastAuthUser`));
     if (!current) return;
     if (current !== previous.username) {
       await discardStoredSession(previous.username);
+      // LastAuthUser may still have named the old user (a racing refresh
+      // restored it), and discarding removed it: make the new user current.
+      if (known) await restoreStoredSession(known);
       return;
     }
     const now = await kv.getItem(`${prefix}${current}.refreshToken`);

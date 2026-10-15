@@ -5,6 +5,11 @@ vi.mock('aws-amplify/auth', () => ({
   signIn: vi.fn(),
 }));
 const clearTokens = vi.hoisted(() => vi.fn());
+const readStoredSession = vi.hoisted(() => vi.fn());
+vi.mock('./storedSession', async (orig) => ({
+  ...(await orig<typeof import('./storedSession')>()),
+  readStoredSession,
+}));
 vi.mock('aws-amplify/auth/cognito', () => ({
   cognitoUserPoolsTokenProvider: { tokenOrchestrator: { clearTokens } },
 }));
@@ -35,7 +40,11 @@ const run = (
     adoptSession,
     onReplaced,
   });
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  readStoredSession.mockResolvedValue(null);
+});
+const stored = { username: 'u-old', email: 'old@b.c', refreshToken: 'r', revocable: true };
 
 describe('signInHandlingExistingSession', () => {
   it("default 'replace': signs in again ignoring the session, no sign-out, no token clearing", async () => {
@@ -52,6 +61,21 @@ describe('signInHandlingExistingSession', () => {
     doSignInIgnoringSession.mockRejectedValue(bad);
     await expect(run(vi.fn().mockRejectedValue(existing()))).rejects.toBe(bad);
     expect(clearTokens).not.toHaveBeenCalled();
+  });
+
+  it("'replace' registers the session being replaced before signing in, and a failed sign-in is rethrown", async () => {
+    readStoredSession.mockResolvedValue(stored);
+    const bad = Object.assign(new Error('pw'), { name: 'NotAuthorizedException' });
+    doSignInIgnoringSession.mockRejectedValue(bad);
+    await expect(run(vi.fn().mockRejectedValue(existing()))).rejects.toBe(bad);
+    expect(onReplaced).toHaveBeenCalledWith(stored);
+    expect(clearTokens).not.toHaveBeenCalled();
+  });
+
+  it("'reject' never registers a replaced session", async () => {
+    readStoredSession.mockResolvedValue(stored);
+    vi.mocked(fetchAuthSession).mockResolvedValue({ tokens: {} } as never);
+    await run(vi.fn().mockRejectedValue(existing()), 'reject', async () => undefined).catch(() => undefined);
     expect(onReplaced).not.toHaveBeenCalled();
   });
 
@@ -120,6 +144,77 @@ describe('signInHandlingExistingSession', () => {
       run(doSignIn, 'reject'),
     ).rejects.toBe(bad);
     expect(clearTokens).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkSessionOnMount retry (opt-in)', () => {
+  const net = () => Object.assign(new Error('net'), { name: 'NetworkError' });
+  const deps = <T extends object>(over: T = {} as T) => ({
+    fetchSession: vi.fn().mockResolvedValue({ tokens: {} }),
+    loadUser: vi.fn().mockResolvedValue(undefined),
+    clearCurrentUser: vi.fn(),
+    isStale: () => false,
+    ...over,
+  });
+  const retry = () => ({
+    delaysMs: [1, 2],
+    onTransientFailure: vi.fn(),
+    sleep: vi.fn().mockResolvedValue(undefined),
+  });
+
+  it('without retry, a transient failure logs the tab out as before', async () => {
+    const d = deps({ loadUser: vi.fn().mockRejectedValue(net()) });
+    await checkSessionOnMount(d);
+    expect(d.clearCurrentUser).toHaveBeenCalledOnce();
+  });
+
+  it('retries a transient failure and recovers without logging out', async () => {
+    const d = deps({ loadUser: vi.fn().mockRejectedValueOnce(net()).mockResolvedValue(undefined), retry: retry() });
+    await checkSessionOnMount(d);
+    expect(d.loadUser).toHaveBeenCalledTimes(2);
+    expect(d.clearCurrentUser).not.toHaveBeenCalled();
+    expect(d.retry.onTransientFailure).not.toHaveBeenCalled();
+    expect(d.retry.sleep).toHaveBeenCalledWith(1);
+  });
+
+  it('gives up after the delays: reports it and leaves the state alone', async () => {
+    const d = deps({ fetchSession: vi.fn().mockRejectedValue(net()), retry: retry() });
+    await checkSessionOnMount(d);
+    expect(d.fetchSession).toHaveBeenCalledTimes(3);
+    expect(d.retry.onTransientFailure).toHaveBeenCalledOnce();
+    expect(d.clearCurrentUser).not.toHaveBeenCalled();
+  });
+
+  it('a definitive failure is never retried: tokens are cleared and the tab is logged out', async () => {
+    const dead = Object.assign(new Error('revoked'), { name: 'NotAuthorizedException' });
+    const d = deps({ fetchSession: vi.fn().mockRejectedValue(dead), retry: retry() });
+    await checkSessionOnMount(d);
+    expect(d.fetchSession).toHaveBeenCalledOnce();
+    expect(clearTokens).toHaveBeenCalledOnce();
+    expect(d.clearCurrentUser).toHaveBeenCalledOnce();
+    expect(d.retry.onTransientFailure).not.toHaveBeenCalled();
+  });
+
+  it('no tokens: logged out without retrying', async () => {
+    const d = deps({ fetchSession: vi.fn().mockResolvedValue({}), retry: retry() });
+    await checkSessionOnMount(d);
+    expect(d.clearCurrentUser).toHaveBeenCalledOnce();
+    expect(d.fetchSession).toHaveBeenCalledOnce();
+  });
+
+  it('a stale check (pool changed) stops quietly', async () => {
+    let stale = false;
+    const d = deps({
+      fetchSession: vi.fn().mockImplementation(async () => {
+        stale = true;
+        throw net();
+      }),
+      isStale: () => stale,
+      retry: retry(),
+    });
+    await checkSessionOnMount(d);
+    expect(d.clearCurrentUser).not.toHaveBeenCalled();
+    expect(d.retry.onTransientFailure).not.toHaveBeenCalled();
   });
 });
 

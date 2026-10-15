@@ -1,6 +1,7 @@
 import { confirmSignIn, signIn } from 'aws-amplify/auth';
 import type { ReauthGuard } from './reauth';
 import type { AuthenticateResult } from './types';
+import { duringOwnSignIn } from './userChange';
 
 type SignInOutput = Awaited<ReturnType<typeof signIn>>;
 type ClientMetadata = Record<string, string>;
@@ -27,8 +28,12 @@ export function createMapSignInResult(loadUserFromSession: () => Promise<unknown
       confirm: (metadata: ClientMetadata | undefined) => ReturnType<typeof confirmSignIn>,
       metadata: ClientMetadata | undefined,
     ): Promise<AuthenticateResult> => {
-      await guard?.beforeStep();
-      return mapSignInResult(await confirm(metadata), metadata, guard);
+      // Storage flips to the new user inside confirmSignIn, before the tab has
+      // loaded them: that is this tab's own doing, not another tab's.
+      return duringOwnSignIn(async () => {
+        await guard?.beforeStep();
+        return mapSignInResult(await confirm(metadata), metadata, guard);
+      });
     };
 
     if (output.isSignedIn) {

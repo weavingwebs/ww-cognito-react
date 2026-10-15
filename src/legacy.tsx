@@ -9,6 +9,7 @@ import {
   type SendCustomChallengeAnswerFn,
 } from './index';
 import { adaptToLegacyBuildUser } from './legacyAdapter';
+import type { AuthProviderOptions } from './types';
 
 /** @deprecated v2-shape config. Use v3's UserPoolConfig instead - see MIGRATION.md. */
 export type UserPoolConfig = {
@@ -63,8 +64,13 @@ export function createCognitoAuth<User extends object>(
 
   const CognitoAuthProvider = ({
     userPool,
+    options,
     children,
-  }: PropsWithChildren<{ userPool: UserPoolConfig }>) => {
+  }: PropsWithChildren<{
+    userPool: UserPoolConfig;
+    // v3 provider options (3.3.0), all opt-in.
+    options?: AuthProviderOptions;
+  }>) => {
     // Memoized so identity is stable across renders even though v3's
     // AuthProvider effect is keyed on the primitive fields, not the object.
     const v3Pool = useMemo(
@@ -80,7 +86,11 @@ export function createCognitoAuth<User extends object>(
       }),
       [userPool.UserPoolId, userPool.ClientId, userPool.AuthFlow],
     );
-    return <AuthProvider userPool={v3Pool}>{children}</AuthProvider>;
+    return (
+      <AuthProvider userPool={v3Pool} options={options}>
+        {children}
+      </AuthProvider>
+    );
   };
 
   return {

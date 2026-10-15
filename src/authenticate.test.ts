@@ -35,6 +35,8 @@ vi.mock('./reauth', () => ({
 }));
 
 import { fetchAuthSession, signIn } from 'aws-amplify/auth';
+import { Hub } from 'aws-amplify/utils';
+import { AMPLIFY_SYMBOL } from '@aws-amplify/core/internals/utils';
 import { authenticateWith, reauthenticateWith } from './authenticate';
 
 const existing = () =>
@@ -48,9 +50,16 @@ const base = () => ({
   loadUserFromSession: vi.fn().mockResolvedValue(undefined),
 });
 
+const guardObj = {
+  beforeStep: vi.fn().mockResolvedValue(undefined),
+  beforeSuccess: vi.fn().mockResolvedValue(undefined),
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  h.createSupersessionGuard.mockReturnValue(undefined);
+  guardObj.beforeStep.mockResolvedValue(undefined);
+  guardObj.beforeSuccess.mockResolvedValue(undefined);
+  h.createSupersessionGuard.mockReturnValue(guardObj);
   h.readStoredSession.mockResolvedValue(null);
 });
 
@@ -74,7 +83,7 @@ describe('authenticateWith', () => {
     expect(deps.mapSignInResult).toHaveBeenCalledWith(
       { isSignedIn: true },
       undefined,
-      undefined,
+      guardObj,
     );
     expect(h.signInIgnoringSession).not.toHaveBeenCalled();
   });
@@ -111,14 +120,14 @@ describe('authenticateWith', () => {
     let onSuccess: (() => Promise<void>) | undefined;
     h.createSupersessionGuard.mockImplementation((fn) => {
       onSuccess = fn;
-      return undefined;
+      return guardObj;
     });
     vi.mocked(signIn).mockRejectedValueOnce(existing());
     h.signInIgnoringSession.mockResolvedValue({ isSignedIn: false } as never);
     await authenticateWith(base());
     expect(h.cleanUpReplacedSession).not.toHaveBeenCalled();
     await onSuccess!();
-    expect(h.cleanUpReplacedSession).toHaveBeenCalledWith(stored);
+    expect(h.cleanUpReplacedSession).toHaveBeenCalledWith(stored, undefined);
     await onSuccess!(); // once only
     expect(h.cleanUpReplacedSession).toHaveBeenCalledOnce();
   });
@@ -127,7 +136,7 @@ describe('authenticateWith', () => {
     let onSuccess: (() => Promise<void>) | undefined;
     h.createSupersessionGuard.mockImplementation((fn) => {
       onSuccess = fn;
-      return undefined;
+      return guardObj;
     });
     vi.mocked(signIn).mockResolvedValue({ isSignedIn: true } as never);
     await authenticateWith(base());
@@ -171,6 +180,7 @@ describe('authenticateWith', () => {
     const confirmReplace = vi.fn();
     vi.mocked(signIn).mockResolvedValue({ isSignedIn: true } as never);
     await authenticateWith({ ...base(), opts: { confirmReplace } });
+    h.readStoredSession.mockResolvedValue(stored); // so a wrongly-called hook would fire
     vi.mocked(signIn).mockRejectedValue(existing());
     vi.mocked(fetchAuthSession).mockResolvedValue({ tokens: {} } as never);
     await authenticateWith({
@@ -178,6 +188,88 @@ describe('authenticateWith', () => {
       opts: { confirmReplace, onExistingSession: 'reject' },
     }).catch(() => undefined);
     expect(confirmReplace).not.toHaveBeenCalled();
+  });
+
+  it('confirmReplace is not called for an empty submit (it must not reveal who is signed in)', async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    vi.mocked(signIn).mockRejectedValue(existing());
+    h.signInIgnoringSession.mockRejectedValue(new Error('empty'));
+    const confirmReplace = vi.fn();
+    await authenticateWith({ ...base(), email: '', pass: '', opts: { confirmReplace } }).catch(() => undefined);
+    await authenticateWith({ ...base(), pass: '', opts: { confirmReplace } }).catch(() => undefined);
+    expect(confirmReplace).not.toHaveBeenCalled();
+  });
+
+  it('a newer attempt started while the prompt was open: this one does not sign in', async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    vi.mocked(signIn).mockRejectedValue(existing());
+    const aborted = Object.assign(new Error('superseded'), { name: 'ReauthAbortedException' });
+    guardObj.beforeStep.mockRejectedValue(aborted);
+    await expect(
+      authenticateWith({ ...base(), opts: { confirmReplace: async () => true } }),
+    ).rejects.toBe(aborted);
+    expect(h.signInIgnoringSession).not.toHaveBeenCalled();
+  });
+
+  it('the stored user changed while the prompt was open: cancels instead of replacing someone never asked about', async () => {
+    h.readStoredSession
+      .mockResolvedValueOnce(stored)
+      .mockResolvedValueOnce({ ...stored, username: 'someone-else', email: 's@b.c' });
+    vi.mocked(signIn).mockRejectedValue(existing());
+    const err = await authenticateWith({
+      ...base(),
+      opts: { confirmReplace: async () => true },
+    }).catch((e) => e);
+    expect(err.name).toBe('ReplaceCancelledException');
+    expect(h.signInIgnoringSession).not.toHaveBeenCalled();
+  });
+
+  it.each(['AmplifyInternalsChangedException', 'UnexpectedSignInInterruptionException'])(
+    'tokens were stored but %s was thrown: cleans up the replaced session, does NOT load whoever is stored, rethrows',
+    async (name) => {
+      h.readStoredSession.mockResolvedValue(stored);
+      let onSuccess: (() => Promise<void>) | undefined;
+      h.createSupersessionGuard.mockImplementation((fn) => {
+        onSuccess = fn;
+        guardObj.beforeSuccess.mockImplementation(async () => void (await onSuccess!()));
+        return guardObj;
+      });
+      vi.mocked(signIn).mockRejectedValueOnce(existing());
+      const boom = Object.assign(new Error('x'), { name });
+      h.signInIgnoringSession.mockRejectedValue(boom);
+      const deps = base();
+      await expect(authenticateWith(deps)).rejects.toBe(boom);
+      expect(h.cleanUpReplacedSession).toHaveBeenCalledWith(stored, undefined);
+      expect(deps.loadUserFromSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('any other sign-in failure cleans nothing up', async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    vi.mocked(signIn).mockRejectedValueOnce(existing());
+    h.signInIgnoringSession.mockRejectedValue(
+      Object.assign(new Error('pw'), { name: 'NotAuthorizedException' }),
+    );
+    await authenticateWith(base()).catch(() => undefined);
+    expect(guardObj.beforeSuccess).not.toHaveBeenCalled();
+    expect(h.cleanUpReplacedSession).not.toHaveBeenCalled();
+  });
+
+  it('cleans up using the user Amplify reported signing in (Hub signedIn), not LastAuthUser', async () => {
+    h.readStoredSession.mockResolvedValue(stored);
+    let onSuccess: (() => Promise<void>) | undefined;
+    h.createSupersessionGuard.mockImplementation((fn) => {
+      onSuccess = fn;
+      return guardObj;
+    });
+    vi.mocked(signIn).mockRejectedValueOnce(existing());
+    h.signInIgnoringSession.mockImplementation(async () => {
+      Hub.dispatch('auth', { event: 'signedIn', data: { username: 'new-user' } }, 'Auth', AMPLIFY_SYMBOL);
+      return { isSignedIn: false } as never;
+    });
+    await authenticateWith(base());
+    await onSuccess!();
+    expect(h.cleanUpReplacedSession).toHaveBeenCalledWith(stored, 'new-user');
   });
 
   it("back-compat: onExistingSession='reject' still adopts then throws AlreadySignedInException", async () => {
@@ -205,7 +297,7 @@ describe('authenticateWith', () => {
     expect(deps.mapSignInResult).toHaveBeenCalledWith(
       { isSignedIn: false },
       clientMetadata,
-      undefined,
+      guardObj,
     );
   });
 });
