@@ -1,8 +1,26 @@
+## Installation
+
+```sh
+yarn add @weavingwebs/ww-cognito-react
+```
+
+`aws-amplify` comes with the library (a regular dependency, pinned `~6.22.1` because the library relies on Amplify
+internals; see "Re-authentication" below). The types `buildUser` needs (`AuthUser`, `FetchUserAttributesOutput`) are
+re-exported here, so an app that only uses those does not need its own `aws-amplify` entry, and then cannot drift
+from the library's range on a future bump. If your app does declare it, keep it in the same range and check that
+`yarn why aws-amplify` lists a single version: Amplify is a process-wide singleton (`Amplify.configure`, Hub, the
+token store), and a second copy nested under this package would run with its own config and tokens, without any error.
+
+It is deliberately not a peer dependency (considered in 3.4): v3 is a drop-in replacement for v2, whose SDK was also a
+regular dependency, so consumers never had to install it; yarn 1 does not install peers, so the switch would need a
+major version and a new install step in every app; and no consumer calls Amplify at runtime, so none can end up on a
+second copy today. Revisit if one does, or in the next major.
+
 ## Example usage
 
 ```tsx
 import { createCognitoAuth, forceSignOut } from '@weavingwebs/ww-cognito-react';
-import type { AuthUser, FetchUserAttributesOutput } from 'aws-amplify/auth';
+import type { AuthUser, FetchUserAttributesOutput } from '@weavingwebs/ww-cognito-react';
 
 type User = { id: string; email: string };
 
@@ -132,11 +150,18 @@ switched user between them. If they still disagree after three tries the load re
   usernames (possibly emails), must not throw (ignored if it does) and **must itself stop presenting the old
   user**: nothing else changes in this tab. In both forms the load that found the change rejects with
   `UserChangedException` (`isUserChangedError`, `USER_CHANGED_EXCEPTION`). Without this option and without
-  `syncTabs` the tab silently switches user, as in 3.2 (the non-strict getters then return the new user's token to
-  code written for the old one). A refresh landing at the wrong instant can restore the old user and cause one extra
-  reload. If your app already has its own token/user mismatch reload (wheels does), do not enable the reload form too.
+  `syncTabs` the tab silently switches user on its next load, as in 3.2; since 3.4 a non-strict getter that finds the
+  other user's token returns `null` and starts that load itself. A refresh landing at the wrong instant can restore the old user and cause one extra
+  reload. Since 3.4 the getters never return the other user's token, so an app-side check that compares the token's
+  user with the tab's user no longer fires: use `onUserChange: 'reload'` instead if you want the page reloaded.
 - **`strictTokens`** changes `getIdJwt` / `getAccessJwt`. By default they return `null` for any failure, which is
-  indistinguishable from being logged out. Strict mode: a transient failure (network, throttling) throws; a session
+  indistinguishable from being logged out. That includes (since 3.4, with or without any option) tokens in storage
+  that belong to a different user than the state object the getter came from: another tab signed in as someone else,
+  this tab's own sign-in in progress, or a closure holding an old state. A caller that sends `null` as "no token"
+  then makes an unauthenticated request, never one as the wrong user, and the getter starts a background load so the
+  tab catches up (the `onUserChange` reaction if configured, otherwise an in-place switch to the stored user; at
+  most one retry per 30 s after a failed load). Both tokens are checked, so a session caught mid-write with two
+  users' tokens is refused too. Strict mode: a transient failure (network, throttling) throws; a session
   Amplify has dropped locally logs this tab out (after a short re-check); and tokens that belong to a different user
   than the state object the getter came from throw `UserChangedException` instead of reaching code written for the
   old user (poll loops should rethrow it at once, not retry). This holds during this tab's own sign-in too, and for a
@@ -146,7 +171,7 @@ switched user between them. If they still disagree after three tries the load re
   else happens in this tab after a `UserChangedException`, which keeps showing the old user until something reloads
   or logs it out, so the caller must do that. A transient failure is rethrown as Amplify's own error (e.g. "A network
   error has occurred."), so a caller that used `null` to tell "offline" from "expired" must catch it and decide for
-  itself (wheels' `useGraphql` needs changes before it can adopt this).
+  itself.
 - **`retrySessionCheck`**: the mount-time check normally logs the tab out on any failure (documented trade-off). With
   this it retries (3 tries) and then stays at `isLoggedIn: null` with `sessionCheckFailed: true` and
   `retrySessionCheck()` on the state, instead of reporting a logout. **Never treat `null` as "allowed"**: a gate
@@ -235,6 +260,10 @@ reference only when every field is unchanged, rather than mutating the previous 
 what v2 did, and which had a real bug: mutating an object and passing the same reference back into
 `useState`'s setter makes React bail out of re-rendering entirely, silently dropping legitimate updates).
 It depends on `buildUser` staying pure - see the note above.
+
+`getIdJwt` / `getAccessJwt` on the signed-in state are likewise stable for as long as the signed-in user is the same
+(across refreshes, `refreshSession`, `reauthenticate`, ...), so they are safe as hook dependencies. They change when
+the user changes: each pair is bound to its user and never returns another user's token.
 
 ## A note on `Amplify.configure`
 

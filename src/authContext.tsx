@@ -36,6 +36,7 @@ import {
   isTokenClearingError,
 } from './sessionGuards';
 import { createSessionSync } from './sessionSync';
+import { createBoundGetters } from './boundGetters';
 import type {
   AuthenticateOptions,
   AuthProviderOptions,
@@ -335,15 +336,21 @@ export function createCognitoAuth<User extends object>(
     // `strictTokens` (opt-in): a transient failure throws instead of looking
     // like a logout, a session Amplify has dropped logs this tab out, and tokens
     // that belong to a different user than the caller was written for throw
-    // UserChangedError. `expected` is the user of the state object the getter
-    // belongs to, so a closure holding an old state cannot receive a new
-    // user's token after this tab switched.
+    // UserChangedError (without it they return null). `expected` is the user
+    // of the state object the getter belongs to, so a closure holding an old
+    // state cannot receive a new user's token after this tab switched.
     const getToken = useCallback(
       async (
         kind: 'idToken' | 'accessToken',
-        expected?: string,
+        expected: string,
       ): Promise<string | null> => {
         const strict = !!optionsRef.current?.strictTokens;
+        // A signed-in state always has a user; without one nothing could be
+        // compared, so fail closed rather than hand out whatever is stored.
+        if (!expected) {
+          if (strict) throw userChangedError();
+          return null;
+        }
         let session: Awaited<ReturnType<typeof fetchAuthSession>>;
         try {
           session = await fetchAuthSession();
@@ -361,13 +368,20 @@ export function createCognitoAuth<User extends object>(
           }
           return null;
         }
-        if (strict) syncRef.current?.assertSameUser(session, expected);
+        if (strict) {
+          syncRef.current?.assertSameUser(session, expected);
+        } else if (syncRef.current && !syncRef.current.ownsSession(session, expected)) {
+          // Another user's token (another tab signed in as someone else, this
+          // tab's own sign-in in progress, or a closure holding an old state):
+          // null, never the wrong user's token, and the tab catches up.
+          syncRef.current.followStoredUser(session, expected);
+          return null;
+        }
         return session.tokens[kind]?.toString() ?? null;
       },
       [clearCurrentUser],
     );
-    const getIdJwt = useCallback(() => getToken('idToken'), [getToken]);
-    const getAccessJwt = useCallback(() => getToken('accessToken'), [getToken]);
+    const bindGetters = useMemo(() => createBoundGetters(getToken), [getToken]);
 
     const logout = useCallback(async (): Promise<void> => {
       // A refresh already in flight in another tab can write this session back
@@ -504,8 +518,7 @@ export function createCognitoAuth<User extends object>(
         ...claimsFromSession(currentUser.session),
         refreshSession,
         reauthenticate,
-        getAccessJwt: () => getToken('accessToken', currentUser.authUser.username),
-        getIdJwt: () => getToken('idToken', currentUser.authUser.username),
+        ...bindGetters(currentUser.authUser.username),
         logout,
         changePassword,
         updateEmail,
@@ -523,7 +536,7 @@ export function createCognitoAuth<User extends object>(
       authenticate,
       resetPassword,
       confirmResetPassword,
-      getToken,
+      bindGetters,
       refreshSession,
       reauthenticate,
       logout,

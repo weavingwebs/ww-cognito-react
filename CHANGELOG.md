@@ -1,4 +1,44 @@
-# Changelog
+cd# Changelog
+
+## 3.4.0
+
+### Behaviour changes
+
+- **The non-strict `getIdJwt` / `getAccessJwt` no longer hand out another user's token.** In 3.3 the user cross-check
+  ran only with `strictTokens`, so when storage held a different user than the state object the getter came from
+  (another tab on the same origin signed in as someone else, this tab's own `authenticate` mid-way, or a closure
+  holding an old state) the getter returned that user's token, and API calls made from a UI showing user A went out
+  as user B. They now return `null`, within the existing "`null` for any failure" contract, so a caller that sends
+  `null` as "no token" fails closed (unauthenticated). Always on, no option: no consumer wants another user's token.
+  The check covers both tokens: a session caught mid-write with one user's ID token and another's access token is
+  refused too (in strict mode as well). The getter also starts a background load of the stored user, so the tab
+  catches up instead of handing out `null` until something else reloads it: with `onUserChange` / `syncTabs` that
+  load runs the configured reaction; with neither, the tab switches to the stored user in place (no page reload), as
+  its next load always did. One load per stored session; after a failed load (offline, a revoked session) at most
+  one retry per 30 s, so a polled getter never becomes a Cognito call per request. Not during this tab's own
+  sign-in, not for a closure whose tab has already switched, and never for a session this tab explicitly logged out
+  of. Apps with their own token/user mismatch check never reach it now (the getter no longer returns the other
+  user's token): a consumer that treats a `null` getter as a transient failure and retries will see `null` on a
+  cross-tab user change, and without a configured reaction the tab then switches user in place. To reload the page
+  instead, set `options={{ onUserChange: 'reload' }}` with this upgrade (the app-side check can then go). Strict mode
+  is otherwise unchanged (still throws `UserChangedException`).
+
+### Fixed
+
+- **`getIdJwt` / `getAccessJwt` are stable again for the same user.** 3.2 returned one `useCallback` pair for the
+  provider's lifetime; 3.3 bound them to the state's user (so an old closure cannot get a new user's token) but
+  rebuilt them on every user reload (`refreshSession`, `reauthenticate`, `confirmEmailVerificationCode`, and with
+  `syncTabs` every token refresh), so consumers using them as hook dependencies rebuilt and refetched each time. They now keep their identity until the user changes. This is now documented (README "Stable
+  user identity") and tested.
+
+### Added
+
+- **`AuthUser` and `FetchUserAttributesOutput` are re-exported** (types only, from `aws-amplify/auth`), so a
+  `buildUser` callback no longer needs its own `aws-amplify` dependency. Optional: an app that declares `aws-amplify`
+  only for these types can import them from here and drop it, so a future bump of the library's Amplify range cannot
+  leave the app on a different version (which would install a second, nested copy). Types are erased at build time,
+  so this changes nothing at runtime. `aws-amplify` stays a regular dependency, not a peer; the README
+  ("Installation") says why.
 
 ## 3.3.0
 
