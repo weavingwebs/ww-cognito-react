@@ -3,6 +3,7 @@ import {
   clearReloadFlag,
   createLoadCoordinator,
   isOwnSignInActive,
+  isUserChangedError,
   runWhenSignInEnds,
   sessionUsername,
   shouldReloadFor,
@@ -12,6 +13,27 @@ import {
 } from './userChange';
 
 type Session = Parameters<typeof sessionUsername>[0] & { tokens?: unknown };
+
+// After a follow-up load fails (offline, a revoked session, ...), how long a
+// non-strict getter waits before it may start another one.
+export const FOLLOW_RETRY_MS = 30_000;
+
+// The two tokens of one session are written separately, so a reader can catch
+// another user's access token next to the previous ID token (the storage
+// prefix is the login name with USER_PASSWORD_AUTH, which two people can share
+// over time). `sub` is in both tokens.
+const tokensDisagree = (session: Session | undefined): boolean => {
+  const idSub = session?.tokens?.idToken?.payload.sub;
+  const accessSub = session?.tokens?.accessToken?.payload.sub;
+  return (
+    typeof idSub === 'string' && typeof accessSub === 'string' && idSub !== accessSub
+  );
+};
+
+const tokenId = (session: Session | undefined): string => {
+  const payload = session?.tokens?.accessToken?.payload;
+  return String(payload?.jti ?? payload?.iat ?? '');
+};
 
 // Keeps one tab in step with the session in storage. All the logic lives here
 // (not in the provider) so it can be tested without a React tree.
@@ -40,6 +62,11 @@ export function createSessionSync(deps: {
   // signedOut + signedIn pair one switch produces, must not call a consumer's
   // callback over and over.
   let lastReacted: string | undefined;
+  // Likewise one follow-up load per stored session a non-strict getter finds
+  // to be another user's (keyed on its token, so a new sign-in is followed
+  // again), and after a failed load at most one retry per FOLLOW_RETRY_MS: a
+  // polled getter must never turn into a Cognito call per request.
+  let followed: { key: string; retryAt?: number } | undefined;
 
   // Never throws: a consumer callback must not break the auth flow.
   const react = (change: UserChange): void => {
@@ -81,21 +108,76 @@ export function createSessionSync(deps: {
     throw userChangedError();
   };
 
-  // For the token getters in strict mode: the session about to be handed out
+  // The one rule for every token getter: the session about to be handed out
   // must belong to the user the CALLER was written for (`expected`, bound when
-  // its state object was built) and this tab must still show that user. While
-  // this tab's own sign-in is running a mismatch throws without reacting: the
-  // new user's token must never reach code written for the old one.
+  // its state object was built) and this tab must still show that user.
+  // undefined: it does (or there is nothing to compare). 'stale': the tab has
+  // moved on from `expected` (a closure holding an old state). 'mixed': the
+  // two tokens belong to different users (caught mid-write). Otherwise the
+  // stored session is another user's.
+  const tokenMismatch = (
+    session: Session | undefined,
+    expected: string | undefined,
+  ): UserChange | 'stale' | 'mixed' | undefined => {
+    if (expected && deps.tabUsername() !== expected) return 'stale';
+    if (expected && tokensDisagree(session)) return 'mixed';
+    const to = sessionUsername(session);
+    if (!expected || !to || expected === to) return undefined;
+    return { from: expected, to };
+  };
+
+  // Strict getters: throw on any mismatch. While this tab's own sign-in is
+  // running it throws without reacting: the new user's token must never reach
+  // code written for the old one.
   const assertSameUser = (
     session: Session | undefined,
     expected: string | undefined = deps.tabUsername(),
   ): void => {
-    const to = sessionUsername(session);
-    const tab = deps.tabUsername();
-    if (expected && tab !== expected) throw userChangedError();
-    if (!expected || !to || expected === to) return;
-    if (!isOwnSignInActive()) react({ from: expected, to });
+    const mismatch = tokenMismatch(session, expected);
+    if (!mismatch) return;
+    if (typeof mismatch === 'object' && !isOwnSignInActive()) react(mismatch);
     throw userChangedError();
+  };
+
+  // Non-strict getters: the same rule, but it never throws or reacts, so the
+  // getter can return null (fail closed) while keeping its "null for any
+  // failure" contract.
+  const ownsSession = (
+    session: Session | undefined,
+    expected: string | undefined = deps.tabUsername(),
+  ): boolean => tokenMismatch(session, expected) === undefined;
+
+  // For the non-strict getters after ownsSession said no: bring the tab in step
+  // with storage in the background, so it does not sit on the old user handing
+  // out nulls. The load runs beforeApply, so the configured reaction happens,
+  // or with none the tab switches user (as its next load always did). Skipped
+  // during this tab's own sign-in (its own load follows), for a closure whose
+  // tab has already moved on, for a half-written session, and for a session
+  // this tab explicitly logged out of.
+  const followStoredUser = (
+    session: Session | undefined,
+    expected: string | undefined = deps.tabUsername(),
+  ): void => {
+    const mismatch = tokenMismatch(session, expected);
+    if (typeof mismatch !== 'object' || isOwnSignInActive()) return;
+    if (session && deps.isResurrection?.(session)) return;
+    const key = `${mismatch.from}→${mismatch.to}:${tokenId(session)}`;
+    if (
+      followed?.key === key &&
+      (followed.retryAt === undefined || Date.now() < followed.retryAt)
+    ) {
+      return;
+    }
+    const entry: { key: string; retryAt?: number } = { key };
+    followed = entry;
+    Promise.resolve()
+      .then(deps.loadUser)
+      .catch((err) => {
+        // A configured reaction already ran: never repeat it. Anything else
+        // (offline, revoked, reads straddling another switch) may be retried.
+        if (isUserChangedError(err) && deps.onUserChange() !== undefined) return;
+        entry.retryAt = Date.now() + FOLLOW_RETRY_MS;
+      });
   };
 
   // Re-reads storage rather than trusting an event: removing one user's refresh
@@ -142,5 +224,12 @@ export function createSessionSync(deps: {
     return coalesced();
   };
 
-  return { beforeApply, assertSameUser, check, react };
+  return {
+    beforeApply,
+    assertSameUser,
+    ownsSession,
+    followStoredUser,
+    check,
+    react,
+  };
 }

@@ -10,6 +10,9 @@ export type {
   SendCustomChallengeAnswerFn,
   UserPoolConfig,
 } from './types';
+// Re-exported so buildUser callbacks need no aws-amplify dependency of their own
+// (a second, nested Amplify copy - see README "Installation").
+export type { AuthUser, FetchUserAttributesOutput } from 'aws-amplify/auth';
 export { createCognitoAuth, forceSignOut } from './authContext';
 export { buildTotpUri } from './totp';
 export { fetchMfaPreference, setTotpPreference } from './mfaPreference';

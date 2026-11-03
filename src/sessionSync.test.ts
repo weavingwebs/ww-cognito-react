@@ -1,7 +1,15 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createSessionSync } from './sessionSync';
+import { FOLLOW_RETRY_MS, createSessionSync } from './sessionSync';
 import { beginOwnSignIn, duringOwnSignIn, isUserChangedError, type OnUserChange } from './userChange';
+
+// ID token for `idUser`, access token for `accessUser` (as caught mid-write).
+const mixed = (idUser: string, accessUser: string) => ({
+  tokens: {
+    idToken: { payload: { 'cognito:username': idUser, sub: `sub-${idUser}` } },
+    accessToken: { payload: { username: accessUser, sub: `sub-${accessUser}` } },
+  },
+});
 
 const session = (name: string | null) =>
   name === null
@@ -132,6 +140,164 @@ describe('assertSameUser (strict token getters)', () => {
   it('with no expected user and a logged-out tab there is nothing to compare', () => {
     tab = undefined;
     expect(() => sync().assertSameUser(session('user-b'))).not.toThrow();
+  });
+});
+
+describe('ownsSession (non-strict token getters)', () => {
+  it('true for the same user, false for another, never throwing or reacting', () => {
+    const s = sync();
+    expect(s.ownsSession(session('user-a'))).toBe(true);
+    expect(s.ownsSession(session('user-b'))).toBe(false);
+    expect(s.ownsSession(session('user-b'), 'user-a')).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(clearTab).not.toHaveBeenCalled();
+  });
+
+  it("false during this tab's own sign-in while storage already holds the new user", async () => {
+    await duringOwnSignIn(async () => {
+      expect(sync().ownsSession(session('user-b'), 'user-a')).toBe(false);
+      expect(sync().ownsSession(session('user-b'))).toBe(false);
+    });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('is bound to the user the CALLER was written for, not whoever the tab shows now', () => {
+    tab = 'user-b';
+    expect(sync().ownsSession(session('user-b'), 'user-a')).toBe(false); // old closure
+    expect(sync().ownsSession(session('user-b'), 'user-b')).toBe(true);
+  });
+
+  it('a closure for a user the tab has logged out of gets no token', () => {
+    tab = undefined;
+    expect(sync().ownsSession(session('user-a'), 'user-a')).toBe(false);
+  });
+
+  it('nothing to compare (logged-out tab, or no username claim) passes as before', () => {
+    expect(sync().ownsSession({ tokens: {} }, 'user-a')).toBe(true);
+    tab = undefined;
+    expect(sync().ownsSession(session('user-b'))).toBe(true);
+  });
+
+  it('does not depend on syncTabs / onUserChange being configured', () => {
+    how = undefined;
+    expect(sync().ownsSession(session('user-b'), 'user-a')).toBe(false);
+  });
+});
+
+describe('followStoredUser (non-strict getter found another user)', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  // A session for `name` whose access token has its own id (a new sign-in or
+  // refresh gives a new one).
+  const tokens = (name: string, jti: string) => ({
+    tokens: {
+      idToken: { payload: { 'cognito:username': name, sub: `sub-${name}` } },
+      accessToken: { payload: { username: name, sub: `sub-${name}`, jti } },
+    },
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('loads the stored user in the background, once per stored session', async () => {
+    const s = sync();
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a'); // polled getter
+    await flush();
+    expect(loadUser).toHaveBeenCalledOnce();
+    expect(reload).not.toHaveBeenCalled(); // the load decides how to react, not the getter
+  });
+
+  it('follows the same switch again when it is a new sign-in (A->B, back to A, B again)', async () => {
+    const s = sync();
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    // The tab went to B and back to A without the key being cleared by a
+    // same-user load; another tab now signs in as B again.
+    s.followStoredUser(tokens('user-b', 'b2'), 'user-a');
+    await flush();
+    expect(loadUser).toHaveBeenCalledTimes(2);
+  });
+
+  it('after a failed load (e.g. offline) retries only once FOLLOW_RETRY_MS has passed, not per call', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const s = sync();
+    loadUser.mockRejectedValue(new Error('A network error has occurred.'));
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    for (let i = 0; i < 20; i++) s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    expect(loadUser).toHaveBeenCalledOnce();
+    vi.setSystemTime(Date.now() + FOLLOW_RETRY_MS);
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    expect(loadUser).toHaveBeenCalledTimes(2);
+  });
+
+  it('never repeats a load whose configured reaction already ran (UserChangedException)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const s = sync();
+    loadUser.mockRejectedValue(Object.assign(new Error('changed'), { name: 'UserChangedException' }));
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    vi.setSystemTime(Date.now() + FOLLOW_RETRY_MS);
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    expect(loadUser).toHaveBeenCalledOnce();
+  });
+
+  it('retries a UserChangedException when no reaction is configured (reads straddled another switch)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    how = undefined;
+    const s = sync();
+    loadUser.mockRejectedValueOnce(Object.assign(new Error('changed'), { name: 'UserChangedException' }));
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    vi.setSystemTime(Date.now() + FOLLOW_RETRY_MS);
+    s.followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    expect(loadUser).toHaveBeenCalledTimes(2);
+  });
+
+  it("does nothing during this tab's own sign-in (its own load follows)", async () => {
+    await duringOwnSignIn(async () => {
+      sync().followStoredUser(tokens('user-b', 'b1'), 'user-a');
+      await flush();
+    });
+    expect(loadUser).not.toHaveBeenCalled();
+  });
+
+  it('never adopts a session this tab explicitly logged out of', async () => {
+    resurrection = true;
+    sync().followStoredUser(tokens('user-b', 'b1'), 'user-a');
+    await flush();
+    expect(loadUser).not.toHaveBeenCalled();
+  });
+
+  it('does nothing for a stale closure, a logged-out tab, no username claim, or a half-written session', async () => {
+    tab = 'user-b';
+    sync().followStoredUser(session('user-c'), 'user-a'); // closure for A, tab already on B
+    tab = undefined;
+    sync().followStoredUser(session('user-b'), 'user-a');
+    tab = 'user-a';
+    sync().followStoredUser({ tokens: {} }, 'user-a');
+    sync().followStoredUser(mixed('user-a', 'user-b'), 'user-a');
+    await flush();
+    expect(loadUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('mixed sessions (ID token of one user, access token of another)', () => {
+  it('never pass: non-strict gets no token, strict throws without reacting', () => {
+    expect(sync().ownsSession(mixed('user-a', 'user-b'), 'user-a')).toBe(false);
+    expect(() => sync().assertSameUser(mixed('user-a', 'user-b'), 'user-a')).toThrow(
+      expect.objectContaining({ name: 'UserChangedException' }),
+    );
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('a consistent session with both tokens passes', () => {
+    expect(sync().ownsSession(mixed('user-a', 'user-a'), 'user-a')).toBe(true);
   });
 });
 

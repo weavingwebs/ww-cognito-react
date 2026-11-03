@@ -1,6 +1,6 @@
 {
   "name": "@weavingwebs/ww-cognito-react",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
@@ -32,6 +32,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
+  "//": "aws-amplify is deliberately a regular dependency, not a peer: see README \"Installation\" before changing it.",
   "dependencies": {
     "aws-amplify": "~6.22.1",
     "qs": "^6.12.3"
